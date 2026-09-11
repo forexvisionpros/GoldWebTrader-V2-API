@@ -1,698 +1,393 @@
 const http = require("http");
-const crypto = require("crypto");
+
+// =====================================================
+// CONFIG
+// =====================================================
 
 const PORT = process.env.PORT || 8080;
 
-// =====================================================
-// DERIV OAUTH CONFIGURATION
-// =====================================================
+const DERIV_PUBLIC_WS =
+  "wss://api.derivws.com/trading/v1/options/ws/public";
 
-const DERIV_CLIENT_ID = "34mYGgOOHIhBdXWQDR91Y";
-const REDIRECT_URI =
-  "https://goldwebtrader-v2-api.onrender.com/oauth/callback";
-
-const DERIV_AUTH_URL =
-  "https://auth.deriv.com/oauth2/auth";
-
-const DERIV_TOKEN_URL =
-  "https://auth.deriv.com/oauth2/token";
-
-const DERIV_API_BASE =
-  "https://api.derivws.com";
+// Start with a commonly available Deriv volatility symbol.
+// We will verify/change it after the connection works.
+const SYMBOL = "1HZ100V";
 
 // =====================================================
-// SERVER STATE
+// STATE
 // =====================================================
 
 let state = {
-  deriv: {
+  broker: "Deriv",
+
+  mode: "DEMO",
+
+  market: {
     connected: false,
-    authenticated: false,
-    accountId: null,
-    balance: 0,
-    currency: null,
-    lastConnected: null,
-    tokenExpiresAt: null
+    symbol: SYMBOL,
+    price: 0,
+    epoch: null,
+    lastUpdate: null,
+    error: null
   },
 
   trading: {
     enabled: false,
-    mode: "DEMO",
-    symbol: "VOLATILITY_75",
-    lotSize: 0.05,
-    maxTrades: 1,
-    dailyProfitTarget: 0,
-    dailyLossLimit: 0
+    tradesEnabled: false
   }
 };
 
 // =====================================================
-// OAUTH TEMPORARY STORAGE
+// WEBSOCKET
 // =====================================================
 
-// Used only while the OAuth login is taking place.
-// PKCE values are short-lived and are never sent to the browser.
-const oauthSessions = new Map();
+let ws = null;
+let reconnectTimer = null;
 
-// =====================================================
-// TOKEN STORAGE
-// =====================================================
+function connectMarketWebSocket() {
 
-// Access token stays on the Render server.
-// NEVER send this value to the frontend.
-let derivAuth = {
-  accessToken: null,
-  expiresAt: 0
-};
+  console.log("Connecting to Deriv public WebSocket...");
 
-// =====================================================
-// HELPERS
-// =====================================================
+  state.market.connected = false;
+  state.market.error = null;
 
-function send(res, statusCode, data, extraHeaders = {}) {
-  res.writeHead(statusCode, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    ...extraHeaders
-  });
+  try {
 
-  res.end(JSON.stringify(data));
-}
+    ws = new WebSocket(DERIV_PUBLIC_WS);
 
-function sendHtml(res, statusCode, html) {
-  res.writeHead(statusCode, {
-    "Content-Type": "text/html; charset=utf-8"
-  });
+    ws.onopen = () => {
 
-  res.end(html);
-}
+      console.log(
+        "================================="
+      );
 
-function randomString(bytes = 32) {
-  return crypto.randomBytes(bytes).toString("base64url");
-}
+      console.log(
+        "DERIV WEBSOCKET CONNECTED"
+      );
 
-function createCodeChallenge(verifier) {
-  return crypto
-    .createHash("sha256")
-    .update(verifier)
-    .digest("base64url");
-}
+      console.log(
+        "Symbol: " + SYMBOL
+      );
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
+      console.log(
+        "================================="
+      );
 
-    req.on("data", chunk => {
-      body += chunk;
-    });
+      state.market.connected = true;
+      state.market.error = null;
 
-    req.on("end", () => {
-      if (!body) {
-        resolve({});
-        return;
-      }
+      // Subscribe to live ticks
+      ws.send(
+        JSON.stringify({
+          ticks: SYMBOL,
+          subscribe: 1,
+          req_id: 1
+        })
+      );
+
+      console.log(
+        "Subscribed to " + SYMBOL
+      );
+    };
+
+    ws.onmessage = event => {
 
       try {
-        resolve(JSON.parse(body));
+
+        const data =
+          JSON.parse(event.data);
+
+        // Handle errors from Deriv
+        if (data.error) {
+
+          console.error(
+            "Deriv WebSocket error:",
+            data.error.message
+          );
+
+          state.market.error =
+            data.error.message;
+
+          return;
+        }
+
+        // Handle live tick
+        if (data.msg_type === "tick") {
+
+          if (
+            data.tick &&
+            data.tick.quote !== undefined
+          ) {
+
+            state.market.price =
+              Number(data.tick.quote);
+
+            state.market.epoch =
+              data.tick.epoch || null;
+
+            state.market.lastUpdate =
+              new Date().toISOString();
+
+            state.market.symbol =
+              data.tick.symbol || SYMBOL;
+
+            console.log(
+              "TICK",
+              state.market.symbol,
+              state.market.price
+            );
+          }
+        }
+
       } catch (error) {
-        reject(error);
-      }
-    });
 
-    req.on("error", reject);
-  });
-}
-
-// =====================================================
-// DERIV TOKEN EXCHANGE
-// =====================================================
-
-async function exchangeCodeForToken(code, codeVerifier) {
-  const body = new URLSearchParams();
-
-  body.set("grant_type", "authorization_code");
-  body.set("client_id", DERIV_CLIENT_ID);
-  body.set("code", code);
-  body.set("code_verifier", codeVerifier);
-  body.set("redirect_uri", REDIRECT_URI);
-
-  const response = await fetch(DERIV_TOKEN_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: body.toString()
-  });
-
-  const text = await response.text();
-
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      "Deriv returned an invalid token response: " + text
-    );
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      "Deriv token exchange failed: " +
-      JSON.stringify(data)
-    );
-  }
-
-  if (!data.access_token) {
-    throw new Error(
-      "Deriv did not return an access token."
-    );
-  }
-
-  return data;
-}
-
-// =====================================================
-// TEST AUTHENTICATED DERIV CONNECTION
-// =====================================================
-
-async function getDerivAccounts() {
-  if (!derivAuth.accessToken) {
-    throw new Error("Not authenticated with Deriv.");
-  }
-
-  const response = await fetch(
-    DERIV_API_BASE + "/trading/v1/options/accounts",
-    {
-      method: "GET",
-      headers: {
-        "Authorization":
-          "Bearer " + derivAuth.accessToken
-      }
-    }
-  );
-
-  const text = await response.text();
-
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      "Invalid Deriv account response: " + text
-    );
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      "Deriv account request failed: " +
-      JSON.stringify(data)
-    );
-  }
-
-  return data;
-}
-
-// =====================================================
-// CREATE OAUTH LOGIN URL
-// =====================================================
-
-function createOAuthLoginUrl() {
-  const codeVerifier = randomString(64);
-  const codeChallenge = createCodeChallenge(codeVerifier);
-  const oauthState = randomString(32);
-
-  oauthSessions.set(oauthState, {
-    codeVerifier,
-    createdAt: Date.now()
-  });
-
-  const authUrl = new URL(DERIV_AUTH_URL);
-
-  authUrl.searchParams.set(
-    "response_type",
-    "code"
-  );
-
-  authUrl.searchParams.set(
-    "client_id",
-    DERIV_CLIENT_ID
-  );
-
-  authUrl.searchParams.set(
-    "redirect_uri",
-    REDIRECT_URI
-  );
-
-  authUrl.searchParams.set(
-    "scope",
-    "trade"
-  );
-
-  authUrl.searchParams.set(
-    "state",
-    oauthState
-  );
-
-  authUrl.searchParams.set(
-    "code_challenge",
-    codeChallenge
-  );
-
-  authUrl.searchParams.set(
-    "code_challenge_method",
-    "S256"
-  );
-
-  return authUrl.toString();
-}
-
-// =====================================================
-// MAIN SERVER
-// =====================================================
-
-const server = http.createServer(async (req, res) => {
-
-  // ---------------------------------------------------
-  // CORS
-  // ---------------------------------------------------
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Headers": "Content-Type",
-      "Access-Control-Allow-Methods":
-        "GET, POST, OPTIONS"
-    });
-
-    return res.end();
-  }
-
-  try {
-
-    const requestUrl = new URL(
-      req.url,
-      "http://localhost"
-    );
-
-    const pathname = requestUrl.pathname;
-
-    // =================================================
-    // HOME
-    // =================================================
-
-    if (
-      req.method === "GET" &&
-      pathname === "/"
-    ) {
-      return send(res, 200, {
-        status: "GoldWebTrader V2 Deriv API online",
-        broker: "Deriv",
-        mode: "DEMO",
-        oauth: true
-      });
-    }
-
-    // =================================================
-    // OAUTH LOGIN
-    // =================================================
-
-    if (
-      req.method === "GET" &&
-      pathname === "/oauth/login"
-    ) {
-
-      const loginUrl = createOAuthLoginUrl();
-
-      res.writeHead(302, {
-        Location: loginUrl
-      });
-
-      return res.end();
-    }
-
-    // =================================================
-    // OAUTH CALLBACK
-    // =================================================
-
-    if (
-      req.method === "GET" &&
-      pathname === "/oauth/callback"
-    ) {
-
-      const code =
-        requestUrl.searchParams.get("code");
-
-      const returnedState =
-        requestUrl.searchParams.get("state");
-
-      const oauthError =
-        requestUrl.searchParams.get("error");
-
-      const oauthErrorDescription =
-        requestUrl.searchParams.get(
-          "error_description"
-        );
-
-      if (oauthError) {
-        return sendHtml(
-          res,
-          400,
-          `
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <meta name="viewport"
-                  content="width=device-width,initial-scale=1">
-            <title>Deriv Login Failed</title>
-          </head>
-          <body style="font-family:Arial;padding:30px">
-            <h2>❌ Deriv Login Failed</h2>
-            <p>${oauthError}</p>
-            <p>${oauthErrorDescription || ""}</p>
-          </body>
-          </html>
-          `
-        );
-      }
-
-      if (!code || !returnedState) {
-        return sendHtml(
-          res,
-          400,
-          `
-          <h2>❌ Invalid OAuth callback</h2>
-          <p>Missing authorization code or state.</p>
-          `
-        );
-      }
-
-      const session =
-        oauthSessions.get(returnedState);
-
-      if (!session) {
-        return sendHtml(
-          res,
-          400,
-          `
-          <h2>❌ OAuth session expired</h2>
-          <p>Please start the Deriv login again.</p>
-          `
-        );
-      }
-
-      // State has now been used.
-      oauthSessions.delete(returnedState);
-
-      // Verify state/session before token exchange.
-      if (
-        Date.now() - session.createdAt >
-        10 * 60 * 1000
-      ) {
-        return sendHtml(
-          res,
-          400,
-          `
-          <h2>❌ OAuth session expired</h2>
-          <p>Please start the login again.</p>
-          `
-        );
-      }
-
-      // Exchange authorization code immediately.
-      const token =
-        await exchangeCodeForToken(
-          code,
-          session.codeVerifier
-        );
-
-      derivAuth.accessToken =
-        token.access_token;
-
-      derivAuth.expiresAt =
-        Date.now() +
-        ((token.expires_in || 3600) * 1000);
-
-      state.deriv.authenticated = true;
-      state.deriv.connected = true;
-      state.deriv.lastConnected =
-        new Date().toISOString();
-
-      // Try to confirm the authenticated account.
-      let accountResult = null;
-
-      try {
-        accountResult =
-          await getDerivAccounts();
-      } catch (accountError) {
         console.error(
-          "Account verification error:",
-          accountError.message
+          "Invalid WebSocket message:",
+          error.message
         );
       }
+    };
 
-      return sendHtml(
-        res,
-        200,
-        `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <meta name="viewport"
-                content="width=device-width,initial-scale=1">
-          <title>Gold Trading App</title>
-          <style>
-            body {
-              margin:0;
-              background:#07111f;
-              color:#fff;
-              font-family:Arial,sans-serif;
-              display:flex;
-              justify-content:center;
-              align-items:center;
-              min-height:100vh;
-              text-align:center;
-            }
+    ws.onerror = error => {
 
-            .box {
-              width:90%;
-              max-width:500px;
-              padding:30px;
-              border-radius:20px;
-              background:#101d31;
-              box-shadow:0 10px 40px rgba(0,0,0,.4);
-            }
-
-            .ok {
-              font-size:60px;
-            }
-
-            h1 {
-              margin:10px 0;
-            }
-
-            p {
-              color:#b8c7d9;
-              line-height:1.6;
-            }
-
-            .demo {
-              display:inline-block;
-              padding:10px 18px;
-              border-radius:30px;
-              background:#183b65;
-              margin-top:10px;
-            }
-          </style>
-        </head>
-
-        <body>
-
-          <div class="box">
-
-            <div class="ok">✅</div>
-
-            <h1>Deriv Connected</h1>
-
-            <p>
-              OAuth authentication completed successfully.
-            </p>
-
-            <div class="demo">
-              DEMO MODE
-            </div>
-
-            <p>
-              Your access token is stored securely
-              on the Render server.
-            </p>
-
-            <p>
-              You can now return to the trading dashboard.
-            </p>
-
-          </div>
-
-        </body>
-        </html>
-        `
+      console.error(
+        "Deriv WebSocket error"
       );
-    }
 
-    // =================================================
-    // DERIV STATUS
-    // =================================================
+      state.market.error =
+        "WebSocket connection error";
+    };
 
-    if (
-      req.method === "GET" &&
-      pathname === "/api/deriv/status"
-    ) {
+    ws.onclose = () => {
 
-      const authenticated =
-        !!derivAuth.accessToken &&
-        Date.now() < derivAuth.expiresAt;
-
-      state.deriv.authenticated =
-        authenticated;
-
-      return send(res, 200, {
-        connected: authenticated,
-        broker: "Deriv",
-        mode: "DEMO",
-        authenticated,
-        tokenExpiresAt:
-          authenticated
-            ? new Date(
-                derivAuth.expiresAt
-              ).toISOString()
-            : null,
-        trading: state.trading
-      });
-    }
-
-    // =================================================
-    // DERIV ACCOUNT TEST
-    // =================================================
-
-    if (
-      req.method === "GET" &&
-      pathname === "/api/deriv/account"
-    ) {
-
-      if (
-        !derivAuth.accessToken ||
-        Date.now() >= derivAuth.expiresAt
-      ) {
-        return send(res, 401, {
-          error: "Deriv is not authenticated."
-        });
-      }
-
-      const accounts =
-        await getDerivAccounts();
-
-      return send(res, 200, accounts);
-    }
-
-    // =================================================
-    // TRADING SETTINGS
-    // =================================================
-
-    if (
-      req.method === "GET" &&
-      pathname === "/api/settings"
-    ) {
-      return send(
-        res,
-        200,
-        state.trading
+      console.log(
+        "Deriv WebSocket disconnected."
       );
-    }
 
-    if (
-      req.method === "POST" &&
-      pathname === "/api/settings"
-    ) {
+      state.market.connected = false;
 
-      const body =
-        await readBody(req);
-
-      state.trading = {
-        ...state.trading,
-        ...body
-      };
-
-      return send(res, 200, {
-        ok: true,
-        settings: state.trading
-      });
-    }
-
-    // =================================================
-    // FUTURE DASHBOARD STATUS
-    // =================================================
-
-    if (
-      req.method === "GET" &&
-      pathname === "/api/status"
-    ) {
-
-      return send(res, 200, {
-        broker: "Deriv",
-        mode: "DEMO",
-        deriv: state.deriv,
-        trading: state.trading
-      });
-    }
-
-    // =================================================
-    // 404
-    // =================================================
-
-    return send(res, 404, {
-      error: "Not found"
-    });
+      scheduleReconnect();
+    };
 
   } catch (error) {
 
     console.error(
-      "SERVER ERROR:",
-      error
+      "WebSocket startup error:",
+      error.message
     );
 
-    return send(res, 500, {
-      error: error.message
-    });
+    state.market.connected = false;
+
+    state.market.error =
+      error.message;
+
+    scheduleReconnect();
   }
-});
+}
 
 // =====================================================
-// CLEAN OLD OAUTH SESSIONS
+// AUTOMATIC RECONNECT
 // =====================================================
 
-setInterval(() => {
+function scheduleReconnect() {
 
-  const now = Date.now();
+  if (reconnectTimer) {
+    return;
+  }
 
-  for (
-    const [oauthState, session]
-    of oauthSessions.entries()
-  ) {
+  console.log(
+    "Reconnecting to Deriv in 5 seconds..."
+  );
 
-    if (
-      now - session.createdAt >
-      10 * 60 * 1000
-    ) {
-      oauthSessions.delete(
-        oauthState
-      );
+  reconnectTimer = setTimeout(() => {
+
+    reconnectTimer = null;
+
+    connectMarketWebSocket();
+
+  }, 5000);
+}
+
+// =====================================================
+// HTTP HELPERS
+// =====================================================
+
+function send(res, statusCode, data) {
+
+  res.writeHead(statusCode, {
+    "Content-Type":
+      "application/json; charset=utf-8",
+
+    "Access-Control-Allow-Origin":
+      "*",
+
+    "Access-Control-Allow-Headers":
+      "Content-Type",
+
+    "Access-Control-Allow-Methods":
+      "GET, POST, OPTIONS"
+  });
+
+  res.end(
+    JSON.stringify(data)
+  );
+}
+
+// =====================================================
+// HTTP SERVER
+// =====================================================
+
+const server =
+  http.createServer(
+    async (req, res) => {
+
+      // -------------------------------------------------
+      // CORS
+      // -------------------------------------------------
+
+      if (req.method === "OPTIONS") {
+
+        res.writeHead(204, {
+
+          "Access-Control-Allow-Origin":
+            "*",
+
+          "Access-Control-Allow-Headers":
+            "Content-Type",
+
+          "Access-Control-Allow-Methods":
+            "GET, POST, OPTIONS"
+        });
+
+        return res.end();
+      }
+
+      try {
+
+        const url =
+          new URL(
+            req.url,
+            "http://localhost"
+          );
+
+        const path =
+          url.pathname;
+
+        // ===============================================
+        // HOME
+        // ===============================================
+
+        if (
+          req.method === "GET" &&
+          path === "/"
+        ) {
+
+          return send(
+            res,
+            200,
+            {
+              status:
+                "GoldWebTrader V2 Deriv API online",
+
+              broker:
+                "Deriv",
+
+              mode:
+                "DEMO",
+
+              websocket:
+                state.market.connected,
+
+              trading:
+                "DISABLED - TEST MODE"
+            }
+          );
+        }
+
+        // ===============================================
+        // MARKET STATUS
+        // ===============================================
+
+        if (
+          req.method === "GET" &&
+          path === "/api/market"
+        ) {
+
+          return send(
+            res,
+            200,
+            state.market
+          );
+        }
+
+        // ===============================================
+        // COMPLETE STATUS
+        // ===============================================
+
+        if (
+          req.method === "GET" &&
+          path === "/api/status"
+        ) {
+
+          return send(
+            res,
+            200,
+            state
+          );
+        }
+
+        // ===============================================
+        // TRADING STATUS
+        // ===============================================
+
+        if (
+          req.method === "GET" &&
+          path === "/api/trading/status"
+        ) {
+
+          return send(
+            res,
+            200,
+            {
+              enabled: false,
+              tradesEnabled: false,
+              message:
+                "Trading is disabled during market-data testing."
+            }
+          );
+        }
+
+        // ===============================================
+        // NOT FOUND
+        // ===============================================
+
+        return send(
+          res,
+          404,
+          {
+            error:
+              "Not found"
+          }
+        );
+
+      } catch (error) {
+
+        console.error(
+          "HTTP ERROR:",
+          error
+        );
+
+        return send(
+          res,
+          500,
+          {
+            error:
+              error.message
+          }
+        );
+      }
     }
-  }
-
-}, 60 * 1000);
+  );
 
 // =====================================================
 // START SERVER
@@ -708,15 +403,19 @@ server.listen(
     );
 
     console.log(
-      "GoldWebTrader V2 Deriv API ONLINE"
+      "GoldWebTrader V2"
     );
 
     console.log(
-      "Listening on port " + PORT
+      "Deriv Market Data Engine"
     );
 
     console.log(
-      "Broker: Deriv"
+      "Server ONLINE"
+    );
+
+    console.log(
+      "Port: " + PORT
     );
 
     console.log(
@@ -724,11 +423,13 @@ server.listen(
     );
 
     console.log(
-      "OAuth: ENABLED"
+      "Trading: DISABLED"
     );
 
     console.log(
       "================================="
     );
+
+    connectMarketWebSocket();
   }
 );
