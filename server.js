@@ -1084,5 +1084,4 @@ async function connectAuthenticatedDemo() {
         }
       };
 
-    ws.onerror =
-      () =
+    ws.onerror = (error) => {
