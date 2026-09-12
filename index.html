@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+  <title>GoldWebTrader V2 — Mobile Dashboard</title>
+  <style>
+    :root{
+      --bg:#0f1724;
+      --card:#0b1220;
+      --muted:#9aa4b2;
+      --accent:#ffd166;
+      --accent-2:#ef476f;
+      --success:#06d6a0;
+      --danger:#ff5c7c;
+      --glass: rgba(255,255,255,0.03);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,#071428 0%, #081126 60%);color:#e6eef8}
+    .app{max-width:920px;margin:0 auto;padding:14px}
+    header{display:flex;gap:12px;align-items:center}
+    h1{font-size:18px;margin:0}
+
+    /* Form */
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    input[type=text], input[type=password], select{flex:1;min-width:160px;padding:12px;border-radius:10px;border:0;background:var(--glass);color:var(--accent-2);outline:2px solid transparent}
+    .btn{background:linear-gradient(90deg,var(--accent),#ffb86b);border:0;color:#06121a;padding:12px 14px;border-radius:10px;font-weight:700}
+    .btn.secondary{background:transparent;border:1px solid rgba(255,255,255,0.06);color:var(--muted);font-weight:600}
+    .btn.warn{background:linear-gradient(90deg,#ff9a9e,#fecfef);color:#23020a}
+
+    /* grid */
+    .grid{display:grid;grid-template-columns:1fr;gap:10px;margin-top:14px}
+    @media(min-width:900px){.grid{grid-template-columns:360px 1fr}}
+
+    .card{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));padding:12px;border-radius:14px;border:1px solid rgba(255,255,255,0.03)}
+    .row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px dashed rgba(255,255,255,0.02)}
+    .row:last-child{border-bottom:0}
+    .label{color:var(--muted);font-size:12px}
+    .value{font-weight:700;color:#e6f7ff}
+    .status-pill{padding:6px 8px;border-radius:999px;font-weight:700;font-size:12px;background:rgba(0,0,0,0.25)}
+    .connected{background:linear-gradient(90deg,var(--success),#2fd996);color:#042018}
+    .disconnected{background:linear-gradient(90deg,#334155,#1f2937);color:var(--muted)}
+
+    /* engine panel */
+    .engine-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .toggle{display:flex;align-items:center;gap:8px}
+    .switch{width:46px;height:26px;border-radius:18px;background:#263238;position:relative;padding:4px;cursor:pointer}
+    .knob{width:18px;height:18px;border-radius:50%;background:#fff;position:absolute;left:4px;top:4px;transition:all .18s}
+    .switch.on{background:linear-gradient(90deg,var(--accent),#ff9a9e)}
+    .switch.on .knob{left:24px}
+
+    /* signals */
+    .signal{font-size:20px;font-weight:900;padding:10px;border-radius:12px;text-align:center}
+    .signal.buy{background:linear-gradient(90deg,#06d6a0,#7af7c6);color:#052018}
+    .signal.sell{background:linear-gradient(90deg,#ff8fa3,#ffccd6);color:#2b0610}
+    .signal.neutral{background:linear-gradient(90deg,#94a3b8,#cbd5e1);color:#071428}
+
+    /* logs */
+    pre{white-space:pre-wrap;word-break:break-word;margin:0;font-size:12px;color:#d7e9ff}
+
+    footer{margin-top:14px;display:flex;gap:8px;flex-wrap:wrap}
+
+    .muted{color:var(--muted);font-size:12px}
+    .small{font-size:13px;color:#c9d8e8}
+
+    .danger{color:var(--danger)}
+    .success{color:var(--success)}
+    .info{color:#9ad0ff}
+
+    .notice{padding:10px;border-radius:10px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.02);margin-bottom:8px}
+
+    /* make inputs big on mobile */
+    input, button{font-size:15px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div style="flex:1">
+        <h1>GoldWebTrader V2 — Mobile Dashboard</h1>
+        <div class="muted" style="margin-top:6px">Android-first — connects to GoldWebTrader V2 API</div>
+      </div>
+      <div style="text-align:right">
+        <div id="connIndicator" class="status-pill disconnected">Disconnected</div>
+      </div>
+    </header>
+
+    <section class="controls">
+      <input type="text" id="apiUrl" placeholder="API URL" value="https://goldwebtrader-v2-api.onrender.com" />
+      <input type="password" id="apiKey" placeholder="API Key (X-API-Key)" />
+      <button id="connectBtn" class="btn">CONNECT</button>
+      <button id="refreshBtn" class="btn secondary">REFRESH</button>
+      <a id="derivLogin" class="btn" style="text-decoration:none;display:inline-flex;align-items:center;gap:8px">Deriv OAuth</a>
+    </section>
+
+    <div class="grid">
+      <div>
+        <div class="card">
+          <div class="notice">Connection Status & Account</div>
+          <div class="row"><div><div class="label">Deriv connection</div><div id="derivConn" class="value">—</div></div></div>
+          <div class="row"><div><div class="label">Account type</div><div id="accountType" class="value">—</div></div></div>
+          <div class="row"><div><div class="label">Account login ID</div><div id="accountId" class="value">—</div></div></div>
+          <div class="row"><div><div class="label">WebSocket status</div><div id="wsStatus" class="value">—</div></div></div>
+          <div class="row"><div><div class="label">V75 (1s) symbol</div><div id="v75Symbol" class="value">—</div></div></div>
+          <div class="row"><div><div class="label">Current price</div><div id="currentPrice" class="value">—</div></div></div>
+          <div class="row"><div><div class="label">Balance</div><div id="balance" class="value">—</div></div></div>
+          <div class="row"><div><div class="label">Open positions</div><div id="positionsCount" class="value">—</div></div></div>
+        </div>
+
+        <div class="card" style="margin-top:10px">
+          <div class="notice">Trading Engine</div>
+          <div class="engine-grid">
+            <div>
+              <div class="row"><div><div class="label">Engine status</div><div id="engineStatus" class="value">—</div></div></div>
+              <div class="row"><div class="label">Auto trading</div><div><div id="autoTrading" class="status-pill">OFF</div></div></div>
+              <div class="row"><div class="label">Execute trades</div><div><div id="executeTrades" class="status-pill">OFF</div></div></div>
+              <div class="row"><div class="label">Demo stake</div><div id="demoStake" class="value">—</div></div>
+            </div>
+            <div>
+              <div class="row"><div class="label">EMA fast</div><div id="emaFast" class="value">—</div></div>
+              <div class="row"><div class="label">EMA slow</div><div id="emaSlow" class="value">—</div></div>
+              <div class="row"><div class="label">RSI</div><div id="rsi" class="value">—</div></div>
+              <div class="row"><div class="label">Current signal</div><div id="currentSignal" class="value">—</div></div>
+              <div class="row"><div class="label">Last signal time</div><div id="lastSignalTime" class="value">—</div></div>
+            </div>
+          </div>
+
+          <div style="margin-top:12px;display:flex;gap:8px">
+            <button id="startEngine" class="btn">START ENGINE</button>
+            <button id="stopEngine" class="btn secondary">STOP ENGINE</button>
+            <button id="refreshMarket" class="btn warn">REFRESH MARKET</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px">
+          <div class="notice">Trade Status</div>
+          <div class="row"><div class="label">Active contract</div><div id="activeContract" class="value">—</div></div>
+          <div class="row"><div class="label">Contract type</div><div id="contractType" class="value">—</div></div>
+          <div class="row"><div class="label">Stake</div><div id="stake" class="value">—</div></div>
+          <div class="row"><div class="label">Buy price</div><div id="buyPrice" class="value">—</div></div>
+          <div class="row"><div class="label">Payout</div><div id="payout" class="value">—</div></div>
+          <div class="row"><div class="label">Profit/Loss</div><div id="pnl" class="value">—</div></div>
+          <div class="row"><div class="label">Result</div><div id="result" class="value">—</div></div>
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button id="closeTrading" class="btn secondary">CLOSE/STOP TRADING</button>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="card">
+          <div class="notice">Signal</div>
+          <div id="signalBox" class="signal neutral">—</div>
+
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <button id="buyBtn" class="btn" style="flex:1">BUY</button>
+            <button id="sellBtn" class="btn" style="flex:1;background:linear-gradient(90deg,#6fb3ff,#3b82f6);color:white">SELL</button>
+          </div>
+
+          <div style="margin-top:12px">
+            <div class="notice">Logs</div>
+            <div style="max-height:320px;overflow:auto;padding:8px;background:rgba(0,0,0,0.15);border-radius:8px;margin-top:8px">
+              <pre id="logs">Fetching logs...</pre>
+            </div>
+          </div>
+
+          <div style="margin-top:12px">
+            <div class="notice">Controls</div>
+            <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+              <button id="toggleAuto" class="btn secondary">Toggle Auto</button>
+              <button id="toggleExecute" class="btn secondary">Toggle Execute</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:10px">
+          <div class="notice">Settings (read-only preview)</div>
+          <div class="row"><div class="label">Engine settings</div><div id="engineSettings" class="value">—</div></div>
+        </div>
+
+      </div>
+    </div>
+
+    <footer>
+      <div class="muted">All requests use X-API-Key header when provided. Auto-refresh every 3s.</div>
+    </footer>
+  </div>
+
+  <script>
+    // Mobile-first dashboard JS — single-file, no frameworks
+    (function(){
+      const apiUrlInput = document.getElementById('apiUrl');
+      const apiKeyInput = document.getElementById('apiKey');
+      const connectBtn = document.getElementById('connectBtn');
+      const refreshBtn = document.getElementById('refreshBtn');
+      const derivLogin = document.getElementById('derivLogin');
+      const connIndicator = document.getElementById('connIndicator');
+
+      const derivConn = document.getElementById('derivConn');
+      const accountType = document.getElementById('accountType');
+      const accountId = document.getElementById('accountId');
+      const wsStatus = document.getElementById('wsStatus');
+      const v75Symbol = document.getElementById('v75Symbol');
+      const currentPrice = document.getElementById('currentPrice');
+      const balanceEl = document.getElementById('balance');
+      const positionsCount = document.getElementById('positionsCount');
+
+      const engineStatus = document.getElementById('engineStatus');
+      const autoTrading = document.getElementById('autoTrading');
+      const executeTrades = document.getElementById('executeTrades');
+      const demoStake = document.getElementById('demoStake');
+      const emaFast = document.getElementById('emaFast');
+      const emaSlow = document.getElementById('emaSlow');
+      const rsi = document.getElementById('rsi');
+      const currentSignal = document.getElementById('currentSignal');
+      const lastSignalTime = document.getElementById('lastSignalTime');
+
+      const signalBox = document.getElementById('signalBox');
+      const buyBtn = document.getElementById('buyBtn');
+      const sellBtn = document.getElementById('sellBtn');
+
+      const activeContract = document.getElementById('activeContract');
+      const contractType = document.getElementById('contractType');
+      const stakeEl = document.getElementById('stake');
+      const buyPrice = document.getElementById('buyPrice');
+      const payout = document.getElementById('payout');
+      const pnl = document.getElementById('pnl');
+      const result = document.getElementById('result');
+
+      const logsEl = document.getElementById('logs');
+      const engineSettingsEl = document.getElementById('engineSettings');
+      const startEngineBtn = document.getElementById('startEngine');
+      const stopEngineBtn = document.getElementById('stopEngine');
+      const refreshMarketBtn = document.getElementById('refreshMarket');
+      const closeTradingBtn = document.getElementById('closeTrading');
+      const toggleAutoBtn = document.getElementById('toggleAuto');
+      const toggleExecuteBtn = document.getElementById('toggleExecute');
+
+      let pollHandle = null;
+      let connected = false;
+      let lastStatus = {};
+
+      function baseUrl(){
+        let u = apiUrlInput.value.trim();
+        if(!u) u = 'https://goldwebtrader-v2-api.onrender.com';
+        // remove trailing slash
+        return u.replace(/\/+$/,'');
+      }
+
+      function setIndicator(isConnected){
+        connIndicator.classList.toggle('connected', isConnected);
+        connIndicator.classList.toggle('disconnected', !isConnected);
+        connIndicator.textContent = isConnected ? 'Connected' : 'Disconnected';
+      }
+
+      async function apiFetch(path, opts={}){
+        const url = baseUrl() + path;
+        const headers = Object.assign({'Accept':'application/json'}, opts.headers||{});
+        const key = apiKeyInput.value.trim();
+        if(key) headers['X-API-Key'] = key;
+
+        const final = Object.assign({}, opts, {headers});
+        try{
+          const res = await fetch(url, final);
+          const text = await res.text();
+          let body = null;
+          try{ body = text ? JSON.parse(text) : null; }catch(e){ body = text }
+          if(!res.ok){
+            throw {status: res.status, body};
+          }
+          return {ok:true, status:res.status, body};
+        }catch(err){
+          return {ok:false, error:err};
+        }
+      }
+
+      function displayError(msg){
+        logsEl.textContent = (new Date()).toISOString()+" — ERROR: " + msg + '\n' + logsEl.textContent;
+      }
+
+      async function fetchStatusOnce(){
+        // Try /api/status then /status
+        let statusResp = await apiFetch('/api/status');
+        if(!statusResp.ok){
+          statusResp = await apiFetch('/status');
+        }
+        return statusResp;
+      }
+
+      async function refreshAll(){
+        // multiple endpoints in parallel
+        const urls = [
+          {path:'/api/status', target:'status'},
+          {path:'/status', target:'status2'},
+          {path:'/market', target:'market'},
+          {path:'/v75/engine/status', target:'engine'},
+          {path:'/v75/engine/settings', target:'settings'},
+          {path:'/logs', target:'logs'}
+        ];
+
+        const promises = urls.map(u => apiFetch(u.path, {method:'GET'}));
+        const results = await Promise.all(promises);
+
+        // determine connectivity
+        const anyOk = results.some(r=>r && r.ok);
+        connected = anyOk;
+        setIndicator(anyOk);
+
+        // status
+        const statusResult = results[0].ok ? results[0] : (results[1].ok ? results[1] : null);
+        if(statusResult && statusResult.body){
+          const s = statusResult.body;
+          // expected fields: deriv_connected, account_type, account_id, websocket
+          derivConn.textContent = s.deriv_connected!==undefined ? (s.deriv_connected ? 'Connected' : 'Disconnected') : (s.deriv ? (s.deriv.connected? 'Connected':'Disconnected') : '—');
+          accountType.textContent = s.account_type || s.type || (s.deriv && s.deriv.account_type) || '—';
+          accountId.textContent = s.account_id || s.login || (s.deriv && s.deriv.login) || '—';
+          wsStatus.textContent = s.websocket || (s.ws ? s.ws : '—');
+        }
+
+        // market
+        if(results[2] && results[2].ok){
+          const m = results[2].body;
+          // Try multiple possible fields
+          v75Symbol.textContent = m.symbol || m.pair || 'V75';
+          currentPrice.textContent = (m.price || m.current_price || m.bid || m.last) ?? '—';
+          balanceEl.textContent = m.balance || m.account_balance || '—';
+          positionsCount.textContent = (Array.isArray(m.positions) ? m.positions.length : (m.open_positions || m.positions_count || '—'));
+
+          // active contract
+          if(m.active_contract){
+            activeContract.textContent = m.active_contract.id || JSON.stringify(m.active_contract);
+            contractType.textContent = m.active_contract.type || '—';
+            stakeEl.textContent = m.active_contract.stake || '—';
+            buyPrice.textContent = m.active_contract.buy_price || '—';
+            payout.textContent = m.active_contract.payout || '—';
+            pnl.textContent = m.active_contract.profit_loss || '—';
+            result.textContent = m.active_contract.result || '—';
+          }
+        }
+
+        // engine status
+        if(results[3] && results[3].ok){
+          const e = results[3].body;
+          engineStatus.textContent = e.status || e.engine || '—';
+          autoTrading.textContent = e.auto ? 'ON' : 'OFF';
+          executeTrades.textContent = e.execute ? 'ON' : 'OFF';
+          demoStake.textContent = e.demo_stake || e.stake || '—';
+          currentSignal.textContent = e.signal || '—';
+          lastSignalTime.textContent = e.last_signal_time || e.lastSignal || '—';
+        }
+
+        // engine settings
+        if(results[4] && results[4].ok){
+          const s = results[4].body;
+          engineSettingsEl.textContent = JSON.stringify(s);
+          emaFast.textContent = s.ema_fast || s.emaFast || '—';
+          emaSlow.textContent = s.ema_slow || s.emaSlow || '—';
+          rsi.textContent = s.rsi || '—';
+          demoStake.textContent = s.demo_stake || demoStake.textContent;
+        }
+
+        // logs
+        if(results[5] && results[5].ok){
+          logsEl.textContent = (Array.isArray(results[5].body) ? results[5].body.join('\n') : (typeof results[5].body === 'string' ? results[5].body : JSON.stringify(results[5].body))) || '—';
+        }
+
+        // signal visualization
+        const sig = currentSignal.textContent && currentSignal.textContent.toString().toLowerCase();
+        if(sig && sig.includes('buy')){
+          signalBox.className = 'signal buy';
+          signalBox.textContent = 'BUY';
+        }else if(sig && (sig.includes('sell')||sig.includes('put'))){
+          signalBox.className = 'signal sell';
+          signalBox.textContent = 'SELL';
+        }else{
+          signalBox.className = 'signal neutral';
+          signalBox.textContent = currentSignal.textContent || '—';
+        }
+
+      }
+
+      async function startPolling(){
+        if(pollHandle) clearInterval(pollHandle);
+        await refreshAll();
+        pollHandle = setInterval(refreshAll, 3000);
+      }
+      function stopPolling(){ if(pollHandle){clearInterval(pollHandle); pollHandle=null} }
+
+      connectBtn.addEventListener('click', async function(){
+        connectBtn.disabled = true;
+        connectBtn.textContent = 'CONNECTING...';
+        await startPolling();
+        connectBtn.textContent = 'CONNECTED';
+        setTimeout(()=>{connectBtn.textContent='CONNECT'}, 1500);
+        connectBtn.disabled = false;
+      });
+
+      refreshBtn.addEventListener('click', function(){ refreshAll(); });
+
+      derivLogin.addEventListener('click', function(e){
+        e.preventDefault();
+        // open oauth on API host
+        const u = baseUrl() + '/oauth/login';
+        window.location.href = u;
+      });
+
+      startEngineBtn.addEventListener('click', async function(){
+        startEngineBtn.disabled=true; startEngineBtn.textContent='STARTING...';
+        const res = await apiFetch('/v75/engine/start', {method:'POST'});
+        if(!res.ok){ displayError('Start engine failed: ' + (res.error?.body?.message || JSON.stringify(res.error)) ); }
+        await refreshAll();
+        startEngineBtn.textContent='START ENGINE'; startEngineBtn.disabled=false;
+      });
+
+      stopEngineBtn.addEventListener('click', async function(){
+        stopEngineBtn.disabled=true; stopEngineBtn.textContent='STOPPING...';
+        const res = await apiFetch('/v75/engine/stop', {method:'POST'});
+        if(!res.ok){ displayError('Stop engine failed: ' + (res.error?.body?.message || JSON.stringify(res.error)) ); }
+        await refreshAll();
+        stopEngineBtn.textContent='STOP ENGINE'; stopEngineBtn.disabled=false;
+      });
+
+      refreshMarketBtn.addEventListener('click', async function(){
+        refreshMarketBtn.disabled=true; refreshMarketBtn.textContent='REFRESHING...';
+        const res = await apiFetch('/v75/engine/refresh', {method:'POST'});
+        if(!res.ok){ displayError('Refresh market failed: ' + (res.error?.body?.message || JSON.stringify(res.error)) ); }
+        await refreshAll();
+        refreshMarketBtn.textContent='REFRESH MARKET'; refreshMarketBtn.disabled=false;
+      });
+
+      closeTradingBtn.addEventListener('click', async function(){
+        closeTradingBtn.disabled=true; closeTradingBtn.textContent='CLOSING...';
+        // there is no explicit endpoint listed to close trades; attempt to call engine stop as safe default
+        const res = await apiFetch('/v75/engine/stop', {method:'POST'});
+        if(!res.ok){ displayError('Close trading failed: ' + (res.error?.body?.message || JSON.stringify(res.error)) ); }
+        await refreshAll();
+        closeTradingBtn.textContent='CLOSE/STOP TRADING'; closeTradingBtn.disabled=false;
+      });
+
+      toggleAutoBtn.addEventListener('click', async function(){
+        // Toggle engine auto flag using /v75/engine/settings if available
+        const cur = autoTrading.textContent === 'ON';
+        const turnOn = !cur;
+        // If account is REAL and turning on auto, ask confirmation
+        if(accountType.textContent && accountType.textContent.toLowerCase().includes('real') && turnOn){
+          if(!confirm('You are on a REAL account. Enabling Auto Trading on a real account can execute live trades. Do you really want to enable it?')) return;
+        }
+        toggleAutoBtn.disabled=true;
+        const settingsRes = await apiFetch('/v75/engine/settings', {method:'GET'});
+        if(settingsRes.ok){
+          const s = settingsRes.body || {};
+          s.auto = turnOn;
+          const put = await apiFetch('/v75/engine/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(s)});
+          if(!put.ok){ displayError('Toggle auto failed: ' + JSON.stringify(put.error)); }
+        }else{
+          displayError('Cannot fetch settings to toggle auto');
+        }
+        toggleAutoBtn.disabled=false;
+        await refreshAll();
+      });
+
+      toggleExecuteBtn.addEventListener('click', async function(){
+        const cur = executeTrades.textContent === 'ON';
+        const turnOn = !cur;
+        if(accountType.textContent && accountType.textContent.toLowerCase().includes('real') && turnOn){
+          if(!confirm('You are on a REAL account. Enabling Execute Trades will allow live buys/sells. Are you sure?')) return;
+        }
+        toggleExecuteBtn.disabled=true;
+        const settingsRes = await apiFetch('/v75/engine/settings', {method:'GET'});
+        if(settingsRes.ok){
+          const s = settingsRes.body || {};
+          s.execute = turnOn;
+          const put = await apiFetch('/v75/engine/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(s)});
+          if(!put.ok){ displayError('Toggle execute failed: ' + JSON.stringify(put.error)); }
+        }else{
+          displayError('Cannot fetch settings to toggle execute');
+        }
+        toggleExecuteBtn.disabled=false;
+        await refreshAll();
+      });
+
+      // Manual BUY/SELL buttons — they should use market endpoints if available. We won't enable live trading automatically.
+      buyBtn.addEventListener('click', async function(){
+        if(executeTrades.textContent !== 'ON'){
+          alert('Execute Trades is OFF — the BUY action will only simulate (no live order)');
+        }
+        buyBtn.disabled=true; buyBtn.textContent='BUYING...';
+        // Try call /market?buy or a generic /market/buy (do not invent — try /market with body)
+        const res = await apiFetch('/market', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'buy'})});
+        if(!res.ok){ displayError('Buy failed: ' + (res.error?.body?.message || JSON.stringify(res.error)) ); }
+        await refreshAll();
+        buyBtn.textContent='BUY'; buyBtn.disabled=false;
+      });
+
+      sellBtn.addEventListener('click', async function(){
+        if(executeTrades.textContent !== 'ON'){
+          alert('Execute Trades is OFF — the SELL action will only simulate (no live order)');
+        }
+        sellBtn.disabled=true; sellBtn.textContent='SELLING...';
+        const res = await apiFetch('/market', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'sell'})});
+        if(!res.ok){ displayError('Sell failed: ' + (res.error?.body?.message || JSON.stringify(res.error)) ); }
+        await refreshAll();
+        sellBtn.textContent='SELL'; sellBtn.disabled=false;
+      });
+
+      // Auto start polling when page loads but not enabling trades
+      (function init(){
+        // Leave engine toggles OFF by default — never enable real trading automatically
+        autoTrading.textContent = 'OFF';
+        executeTrades.textContent = 'OFF';
+        setIndicator(false);
+        // initial quick status
+        refreshAll();
+        // do not start continuous polling until user clicks CONNECT (safer for mobile and privacy)
+      })();
+
+      // Also allow pressing Enter in apiKey to connect
+      apiKeyInput.addEventListener('keyup', function(e){ if(e.key === 'Enter') connectBtn.click(); });
+
+    })();
+  </script>
+</body>
+</html>
