@@ -1,5 +1,7 @@
 const http = require("http");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 // ============================================================
 // GOLDWEBTRADER V2
@@ -27,6 +29,25 @@ const CLIENT_SECRET = process.env.DERIV_CLIENT_SECRET || "";
 // Optional API key for the dashboard.
 const API_KEY =
   process.env.API_KEY || "CHANGE_THIS_API_KEY";
+
+// Index.html cache
+let indexHtmlCache = null;
+let indexHtmlError = null;
+
+// Pre-load index.html on startup
+function loadIndexHtml() {
+  try {
+    const indexPath = path.join(__dirname, "index.html");
+    indexHtmlCache = fs.readFileSync(indexPath, "utf-8");
+    log("index.html loaded successfully.");
+  } catch (error) {
+    indexHtmlError = `Failed to load index.html: ${error.message}`;
+    log(indexHtmlError);
+  }
+}
+
+// Call this after log function is defined
+let logReady = false;
 
 // ------------------------------------------------------------
 // APPLICATION STATE
@@ -123,6 +144,10 @@ function log(message) {
   console.log(`[${entry.time}] ${message}`);
 }
 
+// Now load index.html
+logReady = true;
+loadIndexHtml();
+
 // ------------------------------------------------------------
 // JSON RESPONSE
 // ------------------------------------------------------------
@@ -139,6 +164,22 @@ function sendJSON(res, statusCode, data) {
   });
 
   res.end(body);
+}
+
+// ------------------------------------------------------------
+// HTML RESPONSE
+// ------------------------------------------------------------
+function sendHTML(res, statusCode, html) {
+  res.writeHead(statusCode, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, X-API-Key",
+    "Access-Control-Allow-Methods":
+      "GET, POST, OPTIONS"
+  });
+
+  res.end(html);
 }
 
 // ------------------------------------------------------------
@@ -1177,39 +1218,38 @@ const server =
         req.url.split("?")[0];
 
       // ------------------------------------------------------
-      // ROOT
+      // ROOT — SERVE index.html
       // ------------------------------------------------------
       if (
         req.method === "GET" &&
         url === "/"
       ) {
-        sendJSON(res, 200, {
-          ok: true,
+        if (indexHtmlCache) {
+          sendHTML(res, 200, indexHtmlCache);
+          return;
+        }
 
-          name:
-            "GoldWebTrader V2",
+        if (indexHtmlError) {
+          sendJSON(res, 500, {
+            ok: false,
+            error: indexHtmlError
+          });
+          return;
+        }
 
-          engine:
-            "Volatility 75 (1s) Server-Side Engine",
-
-          version:
-            "V75-SERVER-V1",
-
-          status:
-            state.engine.status,
-
-          symbol:
-            state.engine.symbol,
-
-          demoMode:
-            state.oauth.accountType ===
-            "demo",
-
-          executeTrades:
-            state.engine.executeTrades
-        });
-
-        return;
+        // Fallback: try to load it now
+        try {
+          const indexPath = path.join(__dirname, "index.html");
+          const html = fs.readFileSync(indexPath, "utf-8");
+          sendHTML(res, 200, html);
+          return;
+        } catch (err) {
+          sendJSON(res, 500, {
+            ok: false,
+            error: `Failed to read index.html: ${err.message}`
+          });
+          return;
+        }
       }
 
       // ------------------------------------------------------
