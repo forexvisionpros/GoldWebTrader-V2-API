@@ -1,278 +1,155 @@
-const http = require("http");
-const crypto = require("crypto");
+    ws.onerror = (error) => {
+      console.error("V75 WebSocket error:", error);
 
-// ============================================================
-// GOLDWEBTRADER V2
-// VOLATILITY 75 (1s) SERVER-SIDE ENGINE V1
-// ============================================================
+      state.websocket.connected = false;
+      state.market.connected = false;
+      state.websocket.error =
+        "WebSocket connection error";
 
-const PORT = process.env.PORT || 8080;
+      connecting = false;
+    };
 
-const CLIENT_ID = "34mYGgOOHIhBdXWQDR91Y";
+    ws.onclose = () => {
+      console.log(
+        "V75 authenticated WebSocket closed."
+      );
 
-const REDIRECT_URI =
-  "https://goldwebtrader-v2-api.onrender.com/oauth/callback";
+      state.websocket.connected = false;
+      state.market.connected = false;
 
-const DERIV_API = "https://api.derivws.com";
+      connecting = false;
+      ws = null;
 
-const SYMBOL = "1HZ100V";
+      if (
+        derivAuth.authenticated &&
+        !reconnectTimer
+      ) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
 
-// ============================================================
-// ENGINE SETTINGS
-// ============================================================
+          connectAuthenticatedDemo()
+            .catch(error => {
+              console.error(
+                "Reconnect error:",
+                errorMessage(error)
+              );
 
-const ENGINE = {
-  enabled: true,
+              state.websocket.error =
+                errorMessage(error);
+            });
+        }, 5000);
+      }
+    };
 
-  // V1 is SIGNAL ONLY.
-  // No real/demo order will be sent.
-  executeTrades: false,
+  } catch (error) {
 
-  timeframeSeconds: 60,
+    connecting = false;
 
-  emaFast: 9,
-  emaSlow: 21,
-  rsiLength: 14,
+    state.websocket.connected = false;
+    state.market.connected = false;
 
-  rsiBuyMin: 55,
-  rsiSellMax: 45,
+    state.websocket.error =
+      errorMessage(error);
 
-  momentumBars: 3,
+    console.error(
+      "WebSocket connection error:",
+      errorMessage(error)
+    );
 
-  cooldownSeconds: 60,
+    if (
+      derivAuth.authenticated &&
+      !reconnectTimer
+    ) {
+      reconnectTimer = setTimeout(() => {
 
-  // Maximum number of generated signals per session.
-  maxSignals: 20,
+        reconnectTimer = null;
 
-  // Deriv uses stake rather than MT5 lot size.
-  demoStake: 1
-};
+        connectAuthenticatedDemo()
+          .catch(err => {
+            state.websocket.error =
+              errorMessage(err);
+          });
 
-// ============================================================
-// OAUTH STATE
-// ============================================================
-
-let oauthState = null;
-let codeVerifier = null;
-
-let derivAuth = {
-  authenticated: false,
-  accessToken: null,
-  expiresAt: 0
-};
-
-// ============================================================
-// ACCOUNT
-// ============================================================
-
-let demoAccount = {
-  id: null,
-  balance: 0,
-  currency: "USD",
-  accountType: "demo"
-};
-
-// ============================================================
-// WEBSOCKET
-// ============================================================
-
-let ws = null;
-let reconnectTimer = null;
-let connecting = false;
-
-// ============================================================
-// MARKET DATA
-// ============================================================
-
-let ticks = [];
-
-let candles = [];
-
-let currentCandle = null;
-
-let lastTick = {
-  price: 0,
-  epoch: null,
-  time: null
-};
-
-// ============================================================
-// INDICATORS
-// ============================================================
-
-let indicators = {
-  emaFast: null,
-  emaSlow: null,
-  rsi: null,
-  momentum: null
-};
-
-// ============================================================
-// ENGINE STATE
-// ============================================================
-
-let engineState = {
-  status: "WAITING",
-
-  reason:
-    "Waiting for enough Volatility 75 (1s) data.",
-
-  signal: "NONE",
-
-  lastSignal: null,
-
-  lastSignalTime: null,
-
-  signalsToday: 0,
-
-  lastTradeAttempt: null,
-
-  executionEnabled: false
-};
-
-// ============================================================
-// PORTFOLIO
-// ============================================================
-
-let portfolioState = {
-  positions: 0,
-  lastUpdate: null
-};
-
-// ============================================================
-// GENERAL STATE
-// ============================================================
-
-let state = {
-  broker: "Deriv",
-
-  mode: "DEMO",
-
-  authenticated: false,
-
-  account: {
-    id: null,
-    type: "demo",
-    balance: 0,
-    currency: "USD"
-  },
-
-  websocket: {
-    connected: false,
-    lastConnected: null,
-    lastMessage: null,
-    error: null
-  },
-
-  market: {
-    connected: false,
-    symbol: SYMBOL,
-    price: 0,
-    epoch: null,
-    lastUpdate: null,
-    error: null
-  },
-
-  engine: engineState,
-
-  indicators,
-
-  portfolio: portfolioState,
-
-  trading: {
-    enabled: false,
-    tradesEnabled: false
+      }, 5000);
+    }
   }
-};
-
-// ============================================================
-// HTTP HELPERS
-// ============================================================
-
-function jsonResponse(res, statusCode, data) {
-  const body = JSON.stringify(data, null, 2);
-
-  res.writeHead(statusCode, {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Content-Length": Buffer.byteLength(body)
-  });
-
-  res.end(body);
-}
-
-function htmlResponse(res, statusCode, html) {
-  res.writeHead(statusCode, {
-    "Content-Type": "text/html; charset=utf-8",
-    "Content-Length": Buffer.byteLength(html)
-  });
-
-  res.end(html);
-}
-
-function errorMessage(error) {
-  if (!error) return "Unknown error";
-
-  if (typeof error === "string") {
-    return error;
-  }
-
-  return error.message ||
-    JSON.stringify(error);
 }
 
 // ============================================================
-// PKCE
+// OAUTH LOGIN
 // ============================================================
 
-function randomString(bytes = 32) {
-  return crypto
-    .randomBytes(bytes)
-    .toString("base64url");
+function oauthLoginUrl() {
+
+  oauthState = randomString(32);
+  codeVerifier = randomString(64);
+
+  const challenge =
+    codeChallenge(codeVerifier);
+
+  const params =
+    new URLSearchParams({
+      response_type: "code",
+      client_id: CLIENT_ID,
+      redirect_uri: REDIRECT_URI,
+      scope: "trade",
+      state: oauthState,
+      code_challenge: challenge,
+      code_challenge_method: "S256"
+    });
+
+  return (
+    "https://auth.deriv.com/oauth2/auth?" +
+    params.toString()
+  );
 }
 
-function codeChallenge(verifier) {
-  return crypto
-    .createHash("sha256")
-    .update(verifier)
-    .digest("base64url");
-}
-
 // ============================================================
-// DERIV REST
+// OAUTH TOKEN EXCHANGE
 // ============================================================
 
-async function derivFetch(path, options = {}) {
-  if (!derivAuth.accessToken) {
+async function exchangeOAuthCode(code) {
+
+  if (!codeVerifier) {
     throw new Error(
-      "Deriv OAuth session is not authenticated."
+      "Missing PKCE code verifier."
     );
   }
 
-  const response = await fetch(
-    `${DERIV_API}${path}`,
-    {
-      ...options,
+  const body =
+    new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: CLIENT_ID,
+      code,
+      code_verifier: codeVerifier,
+      redirect_uri: REDIRECT_URI
+    });
 
-      headers: {
-        ...(options.headers || {}),
-        Authorization:
-          `Bearer ${derivAuth.accessToken}`,
+  const response =
+    await fetch(
+      "https://auth.deriv.com/oauth2/token",
+      {
+        method: "POST",
 
-        "Content-Type":
-          "application/json"
+        headers: {
+          "Content-Type":
+            "application/x-www-form-urlencoded"
+        },
+
+        body
       }
-    }
-  );
+    );
 
-  const text = await response.text();
+  const text =
+    await response.text();
 
   let data;
 
   try {
-    data = text
-      ? JSON.parse(text)
-      : {};
+    data =
+      text
+        ? JSON.parse(text)
+        : {};
   } catch {
     data = {
       raw: text
@@ -281,807 +158,698 @@ async function derivFetch(path, options = {}) {
 
   if (!response.ok) {
     throw new Error(
-      `Deriv API ${response.status}: ` +
-      (
-        data?.errors?.[0]?.message ||
-        data?.message ||
-        text ||
-        "Request failed"
-      )
+      data?.error_description ||
+      data?.error ||
+      text ||
+      "OAuth token exchange failed."
     );
   }
 
-  return data;
-}
-
-// ============================================================
-// FIND DEMO ACCOUNT
-// ============================================================
-
-async function findDemoAccount() {
-  const result =
-    await derivFetch(
-      "/trading/v1/options/accounts"
-    );
-
-  const accounts =
-    Array.isArray(result?.data)
-      ? result.data
-      : [];
-
-  const demo =
-    accounts.find(
-      account =>
-        String(account.account_type)
-          .toLowerCase() === "demo"
-    );
-
-  if (!demo) {
+  if (!data.access_token) {
     throw new Error(
-      "No DEMO account found."
+      "OAuth response did not contain an access token."
     );
   }
 
-  demoAccount.id =
-    demo.account_id;
+  derivAuth.accessToken =
+    data.access_token;
 
-  demoAccount.balance =
-    Number(demo.balance || 0);
+  derivAuth.authenticated =
+    true;
 
-  demoAccount.currency =
-    demo.currency || "USD";
+  const expiresIn =
+    Number(data.expires_in || 3600);
 
-  state.account.id =
-    demo.account_id;
+  derivAuth.expiresAt =
+    Date.now() +
+    expiresIn * 1000;
 
-  state.account.type =
-    "demo";
+  state.authenticated = true;
 
-  state.account.balance =
-    demoAccount.balance;
+  oauthState = null;
+  codeVerifier = null;
 
-  state.account.currency =
-    demoAccount.currency;
+  await findDemoAccount();
 
-  return demo;
+  await connectAuthenticatedDemo();
 }
 
 // ============================================================
-// REQUEST NEW AUTHENTICATED WEBSOCKET URL
+// DASHBOARD
 // ============================================================
 
-async function requestDemoWebSocketUrl() {
-  if (!derivAuth.accessToken) {
-    throw new Error(
-      "No Deriv access token."
-    );
-  }
+function dashboardHtml() {
 
-  if (
-    derivAuth.expiresAt &&
-    Date.now() >=
-      derivAuth.expiresAt - 30000
-  ) {
-    throw new Error(
-      "OAuth session expired. Please log in again."
-    );
-  }
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1">
 
-  if (!demoAccount.id) {
-    await findDemoAccount();
-  }
+<title>GoldWebTrader V2</title>
 
-  const result =
-    await derivFetch(
-      `/trading/v1/options/accounts/` +
-      `${encodeURIComponent(demoAccount.id)}/otp`,
-      {
-        method: "POST"
-      }
-    );
+<style>
 
-  const url =
-    result?.data?.url;
-
-  if (!url) {
-    throw new Error(
-      "No authenticated WebSocket URL returned."
-    );
-  }
-
-  return url;
+body {
+  margin: 0;
+  padding: 20px;
+  background: #0b1020;
+  color: #ffffff;
+  font-family: Arial, sans-serif;
 }
 
-// ============================================================
-// EMA
-// ============================================================
-
-function calculateEMA(values, period) {
-  if (
-    !Array.isArray(values) ||
-    values.length < period
-  ) {
-    return null;
-  }
-
-  const multiplier =
-    2 / (period + 1);
-
-  let ema = 0;
-
-  for (
-    let i = 0;
-    i < period;
-    i++
-  ) {
-    ema += values[i];
-  }
-
-  ema /= period;
-
-  for (
-    let i = period;
-    i < values.length;
-    i++
-  ) {
-    ema =
-      (values[i] - ema) *
-      multiplier +
-      ema;
-  }
-
-  return ema;
+.container {
+  max-width: 900px;
+  margin: auto;
 }
 
-// ============================================================
-// RSI
-// ============================================================
-
-function calculateRSI(values, period) {
-  if (
-    !Array.isArray(values) ||
-    values.length <= period
-  ) {
-    return null;
-  }
-
-  let gains = 0;
-  let losses = 0;
-
-  for (
-    let i = 1;
-    i <= period;
-    i++
-  ) {
-    const change =
-      values[i] - values[i - 1];
-
-    if (change > 0) {
-      gains += change;
-    } else {
-      losses += Math.abs(change);
-    }
-  }
-
-  let avgGain =
-    gains / period;
-
-  let avgLoss =
-    losses / period;
-
-  for (
-    let i = period + 1;
-    i < values.length;
-    i++
-  ) {
-    const change =
-      values[i] - values[i - 1];
-
-    const gain =
-      change > 0 ? change : 0;
-
-    const loss =
-      change < 0
-        ? Math.abs(change)
-        : 0;
-
-    avgGain =
-      ((avgGain * (period - 1)) +
-        gain) /
-      period;
-
-    avgLoss =
-      ((avgLoss * (period - 1)) +
-        loss) /
-      period;
-  }
-
-  if (avgLoss === 0) {
-    return 100;
-  }
-
-  const rs =
-    avgGain / avgLoss;
-
-  return 100 -
-    (100 / (1 + rs));
+h1 {
+  margin-bottom: 5px;
 }
 
-// ============================================================
-// BUILD 1-MINUTE CANDLE
-// ============================================================
-
-function processTick(price, epoch) {
-  const candleTime =
-    Math.floor(
-      epoch /
-      ENGINE.timeframeSeconds
-    ) *
-    ENGINE.timeframeSeconds;
-
-  if (
-    !currentCandle ||
-    currentCandle.time !== candleTime
-  ) {
-    if (currentCandle) {
-      candles.push({
-        ...currentCandle
-      });
-
-      if (candles.length > 300) {
-        candles.shift();
-      }
-
-      calculateIndicators();
-    }
-
-    currentCandle = {
-      time: candleTime,
-      open: price,
-      high: price,
-      low: price,
-      close: price
-    };
-
-    evaluateEngine();
-
-    return;
-  }
-
-  currentCandle.high =
-    Math.max(
-      currentCandle.high,
-      price
-    );
-
-  currentCandle.low =
-    Math.min(
-      currentCandle.low,
-      price
-    );
-
-  currentCandle.close =
-    price;
+.subtitle {
+  color: #9ca3af;
+  margin-bottom: 20px;
 }
 
-// ============================================================
-// CALCULATE INDICATORS
-// ============================================================
-
-function calculateIndicators() {
-  const closes =
-    candles.map(
-      candle => candle.close
-    );
-
-  const emaFast =
-    calculateEMA(
-      closes,
-      ENGINE.emaFast
-    );
-
-  const emaSlow =
-    calculateEMA(
-      closes,
-      ENGINE.emaSlow
-    );
-
-  const rsi =
-    calculateRSI(
-      closes,
-      ENGINE.rsiLength
-    );
-
-  let momentum = null;
-
-  if (
-    closes.length >
-    ENGINE.momentumBars
-  ) {
-    momentum =
-      closes[
-        closes.length - 1
-      ] -
-      closes[
-        closes.length -
-        1 -
-        ENGINE.momentumBars
-      ];
-  }
-
-  indicators.emaFast =
-    emaFast;
-
-  indicators.emaSlow =
-    emaSlow;
-
-  indicators.rsi =
-    rsi;
-
-  indicators.momentum =
-    momentum;
-
-  state.indicators =
-    indicators;
+.grid {
+  display: grid;
+  grid-template-columns:
+    repeat(auto-fit,minmax(200px,1fr));
+  gap: 12px;
 }
 
-// ============================================================
-// ENGINE
-// ============================================================
-
-function evaluateEngine() {
-  if (!ENGINE.enabled) {
-    engineState.status =
-      "DISABLED";
-
-    engineState.reason =
-      "Trading engine disabled.";
-
-    return;
-  }
-
-  if (
-    candles.length <
-    ENGINE.emaSlow + 5
-  ) {
-    engineState.status =
-      "BUILDING DATA";
-
-    engineState.reason =
-      `Collecting candles: ` +
-      `${candles.length}/` +
-      `${ENGINE.emaSlow + 5}`;
-
-    return;
-  }
-
-  const emaFast =
-    indicators.emaFast;
-
-  const emaSlow =
-    indicators.emaSlow;
-
-  const rsi =
-    indicators.rsi;
-
-  const momentum =
-    indicators.momentum;
-
-  if (
-    emaFast === null ||
-    emaSlow === null ||
-    rsi === null ||
-    momentum === null
-  ) {
-    engineState.status =
-      "WAITING";
-
-    engineState.reason =
-      "Waiting for indicator data.";
-
-    return;
-  }
-
-  // ----------------------------------------
-  // COOLDOWN
-  // ----------------------------------------
-
-  if (engineState.lastSignalTime) {
-    const elapsed =
-      Date.now() -
-      engineState.lastSignalTime;
-
-    if (
-      elapsed <
-      ENGINE.cooldownSeconds * 1000
-    ) {
-      engineState.status =
-        "COOLDOWN";
-
-      engineState.reason =
-        "Waiting for signal cooldown.";
-
-      return;
-    }
-  }
-
-  // ----------------------------------------
-  // SIGNAL LIMIT
-  // ----------------------------------------
-
-  if (
-    engineState.signalsToday >=
-    ENGINE.maxSignals
-  ) {
-    engineState.status =
-      "LIMIT REACHED";
-
-    engineState.reason =
-      "Maximum V1 signals reached.";
-
-    return;
-  }
-
-  // ----------------------------------------
-  // BUY
-  // ----------------------------------------
-
-  if (
-    emaFast > emaSlow &&
-    rsi >= ENGINE.rsiBuyMin &&
-    momentum > 0
-  ) {
-    registerSignal(
-      "BUY",
-      "EMA bullish + RSI confirmation + positive momentum."
-    );
-
-    return;
-  }
-
-  // ----------------------------------------
-  // SELL
-  // ----------------------------------------
-
-  if (
-    emaFast < emaSlow &&
-    rsi <= ENGINE.rsiSellMax &&
-    momentum < 0
-  ) {
-    registerSignal(
-      "SELL",
-      "EMA bearish + RSI confirmation + negative momentum."
-    );
-
-    return;
-  }
-
-  // ----------------------------------------
-  // WAIT
-  // ----------------------------------------
-
-  engineState.status =
-    "WAITING";
-
-  engineState.signal =
-    "NONE";
-
-  if (emaFast > emaSlow) {
-    engineState.reason =
-      "Bullish trend detected, waiting for stronger confirmation.";
-  } else if (emaFast < emaSlow) {
-    engineState.reason =
-      "Bearish trend detected, waiting for stronger confirmation.";
-  } else {
-    engineState.reason =
-      "No clear trend.";
-  }
+.card {
+  background: #151c32;
+  border-radius: 12px;
+  padding: 18px;
+  border: 1px solid #26304d;
 }
 
-// ============================================================
-// REGISTER SIGNAL
-// ============================================================
-
-function registerSignal(
-  direction,
-  reason
-) {
-  const now =
-    new Date().toISOString();
-
-  engineState.status =
-    "SIGNAL";
-
-  engineState.signal =
-    direction;
-
-  engineState.reason =
-    reason;
-
-  engineState.lastSignal =
-    direction;
-
-  engineState.lastSignalTime =
-    Date.now();
-
-  engineState.signalsToday++;
-
-  engineState.lastTradeAttempt = now;
-
-  console.log(
-    `V75 SIGNAL: ${direction} | ${reason}`
-  );
-
-  // ----------------------------------------------------------
-  // IMPORTANT:
-  // V1 DOES NOT EXECUTE ORDERS.
-  // ----------------------------------------------------------
-
-  if (!ENGINE.executeTrades) {
-    engineState.executionEnabled =
-      false;
-  }
+.label {
+  color: #9ca3af;
+  font-size: 13px;
+  margin-bottom: 8px;
 }
 
-// ============================================================
-// AUTHENTICATED WEBSOCKET
-// ============================================================
+.value {
+  font-size: 22px;
+  font-weight: bold;
+}
 
-async function connectAuthenticatedDemo() {
-  if (connecting) {
-    return;
-  }
+.button {
+  display: inline-block;
+  margin: 15px 0;
+  padding: 12px 18px;
+  border-radius: 8px;
+  background: #2563eb;
+  color: white;
+  text-decoration: none;
+}
 
-  if (
-    !derivAuth.authenticated ||
-    !derivAuth.accessToken
-  ) {
-    return;
-  }
+pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #080c18;
+  padding: 15px;
+  border-radius: 10px;
+  overflow-x: auto;
+}
 
-  connecting = true;
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+<h1>GoldWebTrader V2</h1>
+
+<div class="subtitle">
+Volatility 75 (1s) Server-Side Engine
+</div>
+
+<a class="button"
+   href="/oauth/login">
+   CONNECT DERIV DEMO
+</a>
+
+<div class="grid">
+
+<div class="card">
+<div class="label">AUTHENTICATION</div>
+<div class="value" id="auth">-</div>
+</div>
+
+<div class="card">
+<div class="label">WEBSOCKET</div>
+<div class="value" id="ws">-</div>
+</div>
+
+<div class="card">
+<div class="label">V75 PRICE</div>
+<div class="value" id="price">-</div>
+</div>
+
+<div class="card">
+<div class="label">BALANCE</div>
+<div class="value" id="balance">-</div>
+</div>
+
+<div class="card">
+<div class="label">ENGINE</div>
+<div class="value" id="engine">-</div>
+</div>
+
+<div class="card">
+<div class="label">SIGNAL</div>
+<div class="value" id="signal">-</div>
+</div>
+
+<div class="card">
+<div class="label">EMA 9</div>
+<div class="value" id="emaFast">-</div>
+</div>
+
+<div class="card">
+<div class="label">EMA 21</div>
+<div class="value" id="emaSlow">-</div>
+</div>
+
+<div class="card">
+<div class="label">RSI</div>
+<div class="value" id="rsi">-</div>
+</div>
+
+<div class="card">
+<div class="label">MOMENTUM</div>
+<div class="value" id="momentum">-</div>
+</div>
+
+</div>
+
+<h2>Engine Information</h2>
+
+<pre id="data">
+Loading...
+</pre>
+
+</div>
+
+<script>
+
+async function update() {
 
   try {
-    if (ws) {
+
+    const response =
+      await fetch("/api/engine");
+
+    const data =
+      await response.json();
+
+    document.getElementById("auth")
+      .textContent =
+      data.authenticated
+        ? "CONNECTED"
+        : "OFFLINE";
+
+    document.getElementById("ws")
+      .textContent =
+      data.websocketConnected
+        ? "CONNECTED"
+        : "OFFLINE";
+
+    document.getElementById("price")
+      .textContent =
+      data.market?.price ?? "-";
+
+    document.getElementById("balance")
+      .textContent =
+      data.account?.balance ?? "-";
+
+    document.getElementById("engine")
+      .textContent =
+      data.engine?.status ?? "-";
+
+    document.getElementById("signal")
+      .textContent =
+      data.engine?.signal ?? "-";
+
+    document.getElementById("emaFast")
+      .textContent =
+      data.indicators?.emaFast ?? "-";
+
+    document.getElementById("emaSlow")
+      .textContent =
+      data.indicators?.emaSlow ?? "-";
+
+    document.getElementById("rsi")
+      .textContent =
+      data.indicators?.rsi ?? "-";
+
+    document.getElementById("momentum")
+      .textContent =
+      data.indicators?.momentum ?? "-";
+
+    document.getElementById("data")
+      .textContent =
+      JSON.stringify(data,null,2);
+
+  } catch(error) {
+
+    document.getElementById("data")
+      .textContent =
+      "Dashboard error: " +
+      error.message;
+  }
+}
+
+update();
+
+setInterval(
+  update,
+  2000
+);
+
+</script>
+
+</body>
+</html>`;
+}
+
+// ============================================================
+// HTTP SERVER
+// ============================================================
+
+const server =
+  http.createServer(
+    async (req, res) => {
+
       try {
-        ws.close();
-      } catch {}
-    }
 
-    ws = null;
+        const url =
+          new URL(
+            req.url,
+            `http://${req.headers.host}`
+          );
 
-    const websocketUrl =
-      await requestDemoWebSocketUrl();
+        // ------------------------------------------
+        // DASHBOARD
+        // ------------------------------------------
 
-    console.log(
-      "Connecting V75 DEMO WebSocket..."
-    );
+        if (
+          req.method === "GET" &&
+          url.pathname === "/"
+        ) {
 
-    ws =
-      new WebSocket(
-        websocketUrl
-      );
-
-    ws.onopen = () => {
-      console.log(
-        "V75 authenticated WebSocket connected."
-      );
-
-      connecting = false;
-
-      state.websocket.connected =
-        true;
-
-      state.websocket.lastConnected =
-        new Date().toISOString();
-
-      state.websocket.error =
-        null;
-
-      state.market.connected =
-        true;
-
-      // ------------------------------------
-      // BALANCE
-      // ------------------------------------
-
-      ws.send(
-        JSON.stringify({
-          balance: 1,
-          subscribe: 1,
-          req_id: 101
-        })
-      );
-
-      // ------------------------------------
-      // PORTFOLIO
-      // ------------------------------------
-
-      ws.send(
-        JSON.stringify({
-          portfolio: 1,
-          req_id: 102
-        })
-      );
-
-      // ------------------------------------
-      // V75 1S TICKS
-      // ------------------------------------
-
-      ws.send(
-        JSON.stringify({
-          ticks: SYMBOL,
-          subscribe: 1,
-          req_id: 103
-        })
-      );
-    };
-
-    ws.onmessage =
-      event => {
-
-        try {
-          const message =
-            JSON.parse(
-              event.data
-            );
-
-          state.websocket.lastMessage =
-            new Date().toISOString();
-
-          // --------------------------------
-          // TICK
-          // --------------------------------
-
-          if (
-            message.msg_type ===
-            "tick"
-          ) {
-            const tick =
-              message.tick;
-
-            if (tick) {
-              const price =
-                Number(
-                  tick.quote
-                );
-
-              const epoch =
-                Number(
-                  tick.epoch
-                );
-
-              lastTick.price =
-                price;
-
-              lastTick.epoch =
-                epoch;
-
-              lastTick.time =
-                new Date(
-                  epoch * 1000
-                ).toISOString();
-
-              state.market.price =
-                price;
-
-              state.market.epoch =
-                epoch;
-
-              state.market.lastUpdate =
-                new Date().toISOString();
-
-              state.market.connected =
-                true;
-
-              processTick(
-                price,
-                epoch
-              );
-            }
-          }
-
-          // --------------------------------
-          // BALANCE
-          // --------------------------------
-
-          if (
-            message.msg_type ===
-            "balance"
-          ) {
-            const balanceData =
-              message.balance;
-
-            if (balanceData) {
-              demoAccount.balance =
-                Number(
-                  balanceData.balance || 0
-                );
-
-              demoAccount.currency =
-                balanceData.currency ||
-                "USD";
-
-              state.account.balance =
-                demoAccount.balance;
-
-              state.account.currency =
-                demoAccount.currency;
-            }
-          }
-
-          // --------------------------------
-          // PORTFOLIO
-          // --------------------------------
-
-          if (
-            message.msg_type ===
-            "portfolio"
-          ) {
-            const portfolio =
-              message.portfolio;
-
-            let contracts = [];
-
-            if (
-              Array.isArray(
-                portfolio
-              )
-            ) {
-              contracts =
-                portfolio;
-            }
-
-            if (
-              Array.isArray(
-                portfolio?.contracts
-              )
-            ) {
-              contracts =
-                portfolio.contracts;
-            }
-
-            if (
-              Array.isArray(
-                portfolio?.positions
-              )
-            ) {
-              contracts =
-                portfolio.positions;
-            }
-
-            portfolioState.positions =
-              contracts.length;
-
-            portfolioState.lastUpdate =
-              new Date().toISOString();
-          }
-
-          // --------------------------------
-          // API ERROR
-          // --------------------------------
-
-          if (
-            message.error
-          ) {
-            state.websocket.error =
-              message.error.message ||
-              message.error.code ||
-              "Deriv error";
-
-            console.error(
-              "Deriv error:",
-              state.websocket.error
-            );
-          }
-
-        } catch (error) {
-
-          console.error(
-            "Message processing error:",
-            error
+          return htmlResponse(
+            res,
+            200,
+            dashboardHtml()
           );
         }
-      };
 
-    ws.onerror = (error) => {
+        // ------------------------------------------
+        // OAUTH LOGIN
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/oauth/login"
+        ) {
+
+          const loginUrl =
+            oauthLoginUrl();
+
+          res.writeHead(
+            302,
+            {
+              Location: loginUrl
+            }
+          );
+
+          return res.end();
+        }
+
+        // ------------------------------------------
+        // OAUTH CALLBACK
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/oauth/callback"
+        ) {
+
+          const code =
+            url.searchParams.get("code");
+
+          const returnedState =
+            url.searchParams.get("state");
+
+          const oauthError =
+            url.searchParams.get("error");
+
+          if (oauthError) {
+
+            return htmlResponse(
+              res,
+              400,
+              `<h2>OAuth Error</h2>
+               <p>${oauthError}</p>`
+            );
+          }
+
+          if (
+            !code ||
+            !returnedState ||
+            returnedState !== oauthState
+          ) {
+
+            return htmlResponse(
+              res,
+              400,
+              `<h2>OAuth Error</h2>
+               <p>Invalid OAuth state or missing code.</p>`
+            );
+          }
+
+          await exchangeOAuthCode(code);
+
+          return htmlResponse(
+            res,
+            200,
+            `<h2>✅ Deriv Connected</h2>
+             <p>OAuth authentication completed successfully.</p>
+             <p><strong>DEMO MODE</strong></p>
+             <p>Your access token is stored securely on the Render server.</p>
+             <p><a href="/">Open Dashboard</a></p>`
+          );
+        }
+
+        // ------------------------------------------
+        // HEALTH
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/api/health"
+        ) {
+
+          return jsonResponse(
+            res,
+            200,
+            {
+              ok: true,
+              service:
+                "GoldWebTrader-V2-API",
+              engine:
+                "V75 1S V1",
+              symbol:
+                SYMBOL,
+              timestamp:
+                new Date().toISOString()
+            }
+          );
+        }
+
+        // ------------------------------------------
+        // ENGINE
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/api/engine"
+        ) {
+
+          return jsonResponse(
+            res,
+            200,
+            {
+              engine: {
+                name:
+                  "V75 1S V1",
+
+                enabled:
+                  ENGINE.enabled,
+
+                executeTrades:
+                  ENGINE.executeTrades,
+
+                status:
+                  engineState.status,
+
+                reason:
+                  engineState.reason,
+
+                signal:
+                  engineState.signal,
+
+                lastSignal:
+                  engineState.lastSignal,
+
+                lastSignalTime:
+                  engineState.lastSignalTime,
+
+                signalsToday:
+                  engineState.signalsToday,
+
+                executionEnabled:
+                  engineState.executionEnabled
+              },
+
+              authenticated:
+                derivAuth.authenticated,
+
+              websocketConnected:
+                state.websocket.connected,
+
+              symbol:
+                SYMBOL,
+
+              candles:
+                candles.length,
+
+              currentCandle,
+
+              indicators,
+
+              market:
+                state.market,
+
+              account: {
+                id:
+                  state.account.id,
+
+                type:
+                  "demo",
+
+                balance:
+                  state.account.balance,
+
+                currency:
+                  state.account.currency
+              },
+
+              portfolio:
+                portfolioState,
+
+              timestamp:
+                new Date().toISOString()
+            }
+          );
+        }
+
+        // ------------------------------------------
+        // STATUS
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/api/status"
+        ) {
+
+          return jsonResponse(
+            res,
+            200,
+            state
+          );
+        }
+
+        // ------------------------------------------
+        // MARKET
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/api/market"
+        ) {
+
+          return jsonResponse(
+            res,
+            200,
+            state.market
+          );
+        }
+
+        // ------------------------------------------
+        // DERIV ACCOUNTS
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/api/deriv/account"
+        ) {
+
+          if (!derivAuth.authenticated) {
+
+            return jsonResponse(
+              res,
+              401,
+              {
+                error:
+                  "Not authenticated with Deriv."
+              }
+            );
+          }
+
+          const result =
+            await derivFetch(
+              "/trading/v1/options/accounts"
+            );
+
+          return jsonResponse(
+            res,
+            200,
+            result
+          );
+        }
+
+        // ------------------------------------------
+        // DERIV WEBSOCKET
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/api/deriv/ws"
+        ) {
+
+          return jsonResponse(
+            res,
+            200,
+            {
+              authenticated:
+                derivAuth.authenticated,
+
+              connected:
+                state.websocket.connected,
+
+              symbol:
+                SYMBOL,
+
+              error:
+                state.websocket.error
+            }
+          );
+        }
+
+        // ------------------------------------------
+        // DEBUG ROUTES
+        // ------------------------------------------
+
+        if (
+          req.method === "GET" &&
+          url.pathname === "/api/debug/routes"
+        ) {
+
+          return jsonResponse(
+            res,
+            200,
+            {
+              routes: [
+                "/",
+                "/oauth/login",
+                "/oauth/callback",
+                "/api/health",
+                "/api/engine",
+                "/api/status",
+                "/api/market",
+                "/api/deriv/account",
+                "/api/deriv/ws",
+                "/api/debug/routes"
+              ]
+            }
+          );
+        }
+
+        // ------------------------------------------
+        // 404
+        // ------------------------------------------
+
+        return jsonResponse(
+          res,
+          404,
+          {
+            error:
+              "Route not found"
+          }
+        );
+
+      } catch (error) {
+
+        console.error(
+          "HTTP error:",
+          error
+        );
+
+        return jsonResponse(
+          res,
+          500,
+          {
+            error:
+              errorMessage(error)
+          }
+        );
+      }
+    }
+  );
+
+// ============================================================
+// START SERVER
+// ============================================================
+
+server.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+
+    console.log(
+      "================================================"
+    );
+
+    console.log(
+      "GoldWebTrader V2 started."
+    );
+
+    console.log(
+      `Port: ${PORT}`
+    );
+
+    console.log(
+      `Symbol: ${SYMBOL}`
+    );
+
+    console.log(
+      "Mode: DEMO"
+    );
+
+    console.log(
+      "Execution: OFF"
+    );
+
+    console.log(
+      "================================================"
+    );
+  }
+);
