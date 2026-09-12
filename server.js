@@ -90,10 +90,15 @@ const state = {
 
   candles: [],
 
+  // positions holds trade history. Each position will include open/close details.
   positions: [],
 
   logs: []
 };
+
+// Track a single pending proposal request (we only allow one active trade at a time)
+let pendingProposalRequest = null;
+let activeContractId = null;
 
 // ------------------------------------------------------------
 // TEMPORARY OAUTH STORAGE
@@ -606,6 +611,168 @@ function handleDerivMessage(message) {
 
     return;
   }
+
+  // ----------------------------------------------------------
+  // PROPOSAL (response to a proposal request)
+  // ----------------------------------------------------------
+  if (message.msg_type === "proposal") {
+    const proposal = message.proposal;
+
+    if (!proposal) return;
+
+    // We only proceed if we have a pending proposal request
+    if (!pendingProposalRequest) {
+      // unexpected proposal; ignore
+      return;
+    }
+
+    // only proceed if contract types match (safety)
+    if (
+      pendingProposalRequest.contract_type &&
+      proposal.contract_type &&
+      pendingProposalRequest.contract_type !== proposal.contract_type
+    ) {
+      // mismatch - ignore
+      return;
+    }
+
+    const proposalId = proposal.id;
+    const askPrice = Number(proposal.ask_price || proposal.ask_price_raw || proposal.ask_price_display || proposal.display_value || 0) || Number(proposal.ask_price || 0);
+
+    // send buy request using proposal id and ask price
+    if (ws && state.websocket.authenticated) {
+      try {
+        ws.send(
+          JSON.stringify({
+            buy: proposalId,
+            price: askPrice
+          })
+        );
+
+        log(`Sent BUY request for proposal ${proposalId} (price=${askPrice})`);
+
+        // store the last proposal id on pending object for matching the buy response
+        pendingProposalRequest.proposal_id = proposalId;
+        pendingProposalRequest.ask_price = askPrice;
+
+      } catch (err) {
+        log("Error sending buy request: " + err.message);
+        pendingProposalRequest = null;
+      }
+    }
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // BUY response
+  // ----------------------------------------------------------
+  if (message.msg_type === "buy") {
+    const buy = message.buy;
+
+    if (!buy) return;
+
+    const contractId = buy.contract_id || buy.contract_id || null;
+
+    if (!contractId) return;
+
+    // If we don't have a pending request or proposal, still record but ensure single active trade rule
+    if (activeContractId) {
+      log("Received buy for contract while another active contract exists. Ignoring.");
+      return;
+    }
+
+    // Create a new position entry and mark activeContractId
+    const position = {
+      contractId,
+      contract_type: pendingProposalRequest?.contract_type || (buy.contract_type || null),
+      stake: pendingProposalRequest?.stake || Number(buy.buy_price || buy.purchase) || state.engine.demoStake,
+      buy_price: pendingProposalRequest?.ask_price || Number(buy.buy_price || buy.purchase) || null,
+      payout: null,
+      profit: null,
+      result: null,
+      opened: new Date().toISOString(),
+      closed: null,
+      is_sold: false,
+      raw: message
+    };
+
+    state.positions.push(position);
+
+    activeContractId = contractId;
+
+    // subscribe to proposal_open_contract updates for this contract
+    if (ws && state.websocket.authenticated) {
+      try {
+        ws.send(
+          JSON.stringify({
+            proposal_open_contract: 1,
+            subscribe: 1,
+            contract_id: contractId
+          })
+        );
+
+        log(`Subscribed to proposal_open_contract for ${contractId}`);
+      } catch (err) {
+        log("Error subscribing to proposal_open_contract: " + err.message);
+      }
+    }
+
+    // clear pending proposal
+    pendingProposalRequest = null;
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // PROPOSAL OPEN CONTRACT updates (monitor contract)
+  // ----------------------------------------------------------
+  if (message.msg_type === "proposal_open_contract") {
+    const open = message.proposal_open_contract;
+
+    if (!open) return;
+
+    const cid = open.contract_id || open.contract_id;
+
+    if (!cid) return;
+
+    // find the position
+    const position = state.positions.find(p => p.contractId === cid);
+
+    if (!position) return;
+
+    // update position with incoming fields
+    position.payout = Number(open.payout || position.payout || 0);
+    position.profit = Number(open.profit || position.profit || 0);
+    position.is_sold = Boolean(open.is_sold || position.is_sold);
+
+    if (open.transaction_ids) {
+      position.transaction_ids = open.transaction_ids;
+    }
+
+    if (position.is_sold) {
+      position.closed = new Date().toISOString();
+
+      // determine result
+      if (Number(position.profit) > 0) {
+        position.result = "WIN";
+      } else if (Number(position.profit) < 0) {
+        position.result = "LOSS";
+      } else {
+        position.result = "BREAKEVEN";
+      }
+
+      log(`Contract ${cid} closed. Result=${position.result} Profit=${position.profit}`);
+
+      // clear activeContractId so new trades can be placed
+      if (activeContractId === cid) {
+        activeContractId = null;
+      }
+    }
+
+    return;
+  }
+
 }
 
 // ============================================================
@@ -920,20 +1087,63 @@ function processSignal(data) {
 }
 
 // ============================================================
-// TRADE EXECUTION PLACEHOLDER
+// TRADE EXECUTION
 // ============================================================
 
 async function executeTrade(data) {
-  log(
-    `TRADE EXECUTION REQUESTED: ${data.signal}`
-  );
+  log(`TRADE EXECUTION REQUESTED: ${data.signal}`);
 
-  // V1 intentionally does not send a Deriv contract.
-  // This protects the demo account while the signal
-  // engine is being tested.
+  // Safety checks
+  if (!ws || !state.websocket.authenticated) {
+    log("TRADE_BLOCKED: WebSocket not authenticated.");
+    return;
+  }
 
-  state.engine.status =
-    "TRADE_BLOCKED_V1";
+  // Allow trades only for demo accounts
+  if (state.oauth.accountType !== "demo") {
+    log("REAL_ACCOUNT_BLOCKED");
+    return;
+  }
+
+  // Only one active trade at a time
+  if (activeContractId) {
+    log("TRADE_BLOCKED: Active contract in progress.");
+    return;
+  }
+
+  // Build proposal request
+  const contractType = data.signal === "BUY" ? "CALL" : "PUT";
+  const stake = Math.max(0.35, Number(state.engine.demoStake) || 1);
+
+  // prepare pending request so proposal responses can be matched
+  pendingProposalRequest = {
+    requested_at: Date.now(),
+    contract_type: contractType,
+    stake,
+    signal: data.signal
+  };
+
+  const proposalRequest = {
+    proposal: 1,
+    proposal_request: {
+      amount: stake,
+      basis: "stake",
+      contract_type: contractType,
+      currency: "USD",
+      symbol: state.engine.symbol,
+      duration: 1,
+      duration_unit: "m"
+    }
+  };
+
+  try {
+    ws.send(JSON.stringify(proposalRequest));
+
+    log(`Sent proposal request: ${contractType} stake=${stake}`);
+  } catch (err) {
+    log("Error sending proposal request: " + err.message);
+    pendingProposalRequest = null;
+  }
 }
 
 // ============================================================
