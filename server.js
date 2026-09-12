@@ -12,7 +12,7 @@ const path = require("path");
 const PORT = process.env.PORT || 8080;
 
 // ------------------------------------------------------------
-// DERIV OAUTH
+// DERIV OAUTH 2.0 WITH PKCE
 // ------------------------------------------------------------
 const CLIENT_ID = "34mYGgOOHIhBdXWQDR91Y";
 
@@ -20,6 +20,9 @@ const REDIRECT_URI =
   "https://goldwebtrader-v2-api.onrender.com/oauth/callback";
 
 const DERIV_API = "https://api.derivws.com";
+
+const DERIV_OAUTH_AUTH_ENDPOINT = "https://auth.deriv.com/oauth2/auth";
+const DERIV_OAUTH_TOKEN_ENDPOINT = "https://auth.deriv.com/oauth2/token";
 
 // IMPORTANT:
 // Put your Deriv OAuth client secret in Render Environment Variables.
@@ -122,13 +125,57 @@ let pendingProposalRequest = null;
 let activeContractId = null;
 
 // ------------------------------------------------------------
-// TEMPORARY OAUTH STORAGE
+// TEMPORARY OAUTH STORAGE (with PKCE)
+// Store state, code_verifier, and timestamp for each OAuth attempt
 // ------------------------------------------------------------
 const oauthSessions = new Map();
+const OAUTH_STATE_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
 
-// ------------------------------------------------------------
+// ============================================================
+// PKCE HELPERS
+// ============================================================
+
+/**
+ * Generate a cryptographically secure random string for code_verifier.
+ * RFC 7636 requires 43-128 characters from [A-Z] [a-z] [0-9] - . _ ~
+ */
+function generateCodeVerifier() {
+  return crypto.randomBytes(32).toString("base64url");
+}
+
+/**
+ * Generate code_challenge from code_verifier using SHA256.
+ * RFC 7636 S256 method.
+ */
+function generateCodeChallenge(verifier) {
+  return crypto
+    .createHash("sha256")
+    .update(verifier)
+    .digest("base64url");
+}
+
+/**
+ * Generate a cryptographically secure random state parameter.
+ */
+function generateState() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+// ============================================================
+// OAUTH STATE VALIDATION
+// ============================================================
+
+/**
+ * Check if an OAuth state has expired.
+ */
+function isOAuthStateExpired(sessionData) {
+  const age = Date.now() - sessionData.created;
+  return age > OAUTH_STATE_EXPIRY_MS;
+}
+
+// ============================================================
 // LOGGING
-// ------------------------------------------------------------
+// ============================================================
 function log(message) {
   const entry = {
     time: new Date().toISOString(),
@@ -148,9 +195,9 @@ function log(message) {
 logReady = true;
 loadIndexHtml();
 
-// ------------------------------------------------------------
+// ============================================================
 // JSON RESPONSE
-// ------------------------------------------------------------
+// ============================================================
 function sendJSON(res, statusCode, data) {
   const body = JSON.stringify(data, null, 2);
 
@@ -166,9 +213,9 @@ function sendJSON(res, statusCode, data) {
   res.end(body);
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // HTML RESPONSE
-// ------------------------------------------------------------
+// ============================================================
 function sendHTML(res, statusCode, html) {
   res.writeHead(statusCode, {
     "Content-Type": "text/html; charset=utf-8",
@@ -182,9 +229,9 @@ function sendHTML(res, statusCode, html) {
   res.end(html);
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // API AUTHENTICATION
-// ------------------------------------------------------------
+// ============================================================
 function authorized(req) {
   // Allow health and OAuth endpoints without API key.
   if (
@@ -205,9 +252,9 @@ function authorized(req) {
   return supplied === API_KEY;
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // URL QUERY PARSER
-// ------------------------------------------------------------
+// ============================================================
 function queryParams(url) {
   const result = {};
 
@@ -232,9 +279,9 @@ function queryParams(url) {
   return result;
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // BODY READER
-// ------------------------------------------------------------
+// ============================================================
 function readBody(req) {
   return new Promise((resolve) => {
     let body = "";
@@ -263,85 +310,94 @@ function readBody(req) {
 }
 
 // ============================================================
-// DERIV OAUTH
+// DERIV OAUTH 2.0 (Authorization Code + PKCE Flow)
 // ============================================================
 
-function createOAuthState() {
-  return crypto.randomBytes(32).toString("hex");
-}
+/**
+ * Build the Deriv OAuth 2.0 authorization URL with PKCE.
+ * Returns: { state, codeVerifier, url }
+ */
+function buildOAuthAuthorizationURL() {
+  const state = generateState();
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
 
-function oauthURL() {
-  const oauthState = createOAuthState();
-
-  oauthSessions.set(oauthState, {
+  // Store state, codeVerifier, and timestamp server-side
+  oauthSessions.set(state, {
+    codeVerifier,
     created: Date.now()
   });
 
   const params = new URLSearchParams({
-    app_id: CLIENT_ID,
-    redirect_uri: REDIRECT_URI,
     response_type: "code",
-    state: oauthState
+    client_id: CLIENT_ID,
+    redirect_uri: REDIRECT_URI,
+    scope: "trade",
+    state,
+    code_challenge: codeChallenge,
+    code_challenge_method: "S256"
   });
 
+  const url = `${DERIV_OAUTH_AUTH_ENDPOINT}?${params.toString()}`;
+
   return {
-    state: oauthState,
-    url:
-      `https://oauth.deriv.com/oauth2/authorize?${params.toString()}`
+    state,
+    codeVerifier,
+    url
   };
 }
 
-// ------------------------------------------------------------
-// OAUTH CODE EXCHANGE
-// ------------------------------------------------------------
-async function exchangeOAuthCode(code) {
-  if (!CLIENT_SECRET) {
-    throw new Error(
-      "DERIV_CLIENT_SECRET is missing from Render Environment Variables."
-    );
-  }
-
-  const response = await fetch(
-    `${DERIV_API}/oauth2/token`,
-    {
-      method: "POST",
-
-      headers: {
-        "Content-Type":
-          "application/x-www-form-urlencoded"
-      },
-
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        client_id: CLIENT_ID,
-        client_secret: CLIENT_SECRET,
-        redirect_uri: REDIRECT_URI
-      })
-    }
-  );
-
-  const text = await response.text();
-
-  let data;
+// ============================================================
+// OAUTH TOKEN EXCHANGE (Server-side, with PKCE)
+// ============================================================
+/**
+ * Exchange authorization code for access token.
+ * Sends authorization code + code_verifier to Deriv token endpoint.
+ */
+async function exchangeOAuthCodeForToken(code, codeVerifier) {
+  const params = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: CLIENT_ID,
+    code,
+    code_verifier: codeVerifier,
+    redirect_uri: REDIRECT_URI
+  });
 
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(
-      `OAuth response was not JSON: ${text}`
+    const response = await fetch(
+      DERIV_OAUTH_TOKEN_ENDPOINT,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: params.toString()
+      }
     );
-  }
 
-  if (!response.ok || data.error) {
-    throw new Error(
-      data.error_description ||
-      data.error ||
-      "OAuth token exchange failed."
-    );
-  }
+    const text = await response.text();
 
-  return data;
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(
+        `OAuth token response was not JSON: ${text}`
+      );
+    }
+
+    if (!response.ok || data.error) {
+      throw new Error(
+        data.error_description ||
+        data.error ||
+        "OAuth token exchange failed"
+      );
+    }
+
+    return data;
+  } catch (error) {
+    throw new Error(`Token exchange error: ${error.message}`);
+  }
 }
 
 // ============================================================
@@ -438,9 +494,9 @@ function connectDerivWebSocket() {
   }
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // RECONNECT
-// ------------------------------------------------------------
+// ============================================================
 function scheduleReconnect() {
   if (reconnectTimer) {
     return;
@@ -453,9 +509,9 @@ function scheduleReconnect() {
   }, 5000);
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // AUTHENTICATE
-// ------------------------------------------------------------
+// ============================================================
 function authenticateWebSocket() {
   if (!ws) return;
 
@@ -472,9 +528,9 @@ function authenticateWebSocket() {
   );
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // REQUEST TICKS
-// ------------------------------------------------------------
+// ============================================================
 function subscribeToMarket() {
   if (
     !ws ||
@@ -496,9 +552,9 @@ function subscribeToMarket() {
   );
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // REQUEST CANDLES
-// ------------------------------------------------------------
+// ============================================================
 function requestCandles() {
   if (
     !ws ||
@@ -859,9 +915,9 @@ function calculateEMA(values, period) {
   return ema;
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // RSI
-// ------------------------------------------------------------
+// ============================================================
 function calculateRSI(values, period) {
   if (
     !Array.isArray(values) ||
@@ -942,9 +998,9 @@ function calculateRSI(values, period) {
       (1 + rs);
 }
 
-// ------------------------------------------------------------
+// ============================================================
 // MOMENTUM
-// ------------------------------------------------------------
+// ============================================================
 function calculateMomentum(
   values,
   bars
@@ -1195,9 +1251,9 @@ const server =
   http.createServer(
     async (req, res) => {
 
-      // ------------------------------------------------------
+      // ======================================================
       // CORS PREFLIGHT
-      // ------------------------------------------------------
+      // ======================================================
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
           "Access-Control-Allow-Origin":
@@ -1217,9 +1273,9 @@ const server =
       const url =
         req.url.split("?")[0];
 
-      // ------------------------------------------------------
+      // ======================================================
       // ROOT — SERVE index.html
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "GET" &&
         url === "/"
@@ -1252,9 +1308,9 @@ const server =
         }
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // HEALTH
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "GET" &&
         url === "/health"
@@ -1270,36 +1326,58 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // OAUTH LOGIN
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "GET" &&
         url === "/oauth/login"
       ) {
         try {
-          const result =
-            oauthURL();
+          const oauthData =
+            buildOAuthAuthorizationURL();
+
+          log(
+            `OAuth flow initiated with state=${oauthData.state.substring(0, 8)}...`
+          );
 
           res.writeHead(302, {
-            Location: result.url
+            Location: oauthData.url
           });
 
           res.end();
 
         } catch (error) {
-          sendJSON(res, 500, {
-            ok: false,
-            error: error.message
-          });
+          log(`OAuth login error: ${error.message}`);
+
+          sendHTML(res, 500, `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>OAuth Error</title>
+              <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+                h1 { color: #cc0000; }
+              </style>
+            </head>
+            <body>
+              <div class="error-box">
+                <h1>OAuth Error</h1>
+                <p>${error.message}</p>
+                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+              </div>
+            </body>
+            </html>
+          `);
         }
 
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // OAUTH CALLBACK
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "GET" &&
         url === "/oauth/callback"
@@ -1310,48 +1388,179 @@ const server =
         const code =
           params.code;
 
-        const oauthState =
+        const returnedState =
           params.state;
 
+        const oauthError =
+          params.error;
+
+        const oauthErrorDesc =
+          params.error_description;
+
+        // Handle Deriv OAuth error
+        if (oauthError) {
+          log(
+            `OAuth error from Deriv: ${oauthError} - ${oauthErrorDesc || "no description"}`
+          );
+
+          sendHTML(res, 400, `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>OAuth Error</title>
+              <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+                h1 { color: #cc0000; }
+              </style>
+            </head>
+            <body>
+              <div class="error-box">
+                <h1>OAuth Error</h1>
+                <p><strong>${oauthError}</strong></p>
+                <p>${oauthErrorDesc || "An error occurred during authentication."}</p>
+                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+              </div>
+            </body>
+            </html>
+          `);
+
+          return;
+        }
+
+        // Check for authorization code
         if (!code) {
-          sendJSON(res, 400, {
-            ok: false,
-            error:
-              "OAuth authorization code missing."
-          });
+          log("OAuth callback: Authorization code missing.");
+
+          sendHTML(res, 400, `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>OAuth Error</title>
+              <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+                h1 { color: #cc0000; }
+              </style>
+            </head>
+            <body>
+              <div class="error-box">
+                <h1>OAuth Error</h1>
+                <p>Authorization code missing from callback.</p>
+                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+              </div>
+            </body>
+            </html>
+          `);
 
           return;
         }
 
-        if (
-          !oauthState ||
-          !oauthSessions.has(oauthState)
-        ) {
-          sendJSON(res, 400, {
-            ok: false,
-            error:
-              "Invalid or expired OAuth state."
-          });
+        // Validate state
+        if (!returnedState) {
+          log("OAuth callback: State parameter missing.");
+
+          sendHTML(res, 400, `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>OAuth Error</title>
+              <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+                h1 { color: #cc0000; }
+              </style>
+            </head>
+            <body>
+              <div class="error-box">
+                <h1>OAuth Error</h1>
+                <p>State parameter missing. Invalid request.</p>
+                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+              </div>
+            </body>
+            </html>
+          `);
 
           return;
         }
 
-        oauthSessions.delete(
-          oauthState
-        );
+        const sessionData = oauthSessions.get(returnedState);
 
+        if (!sessionData) {
+          log("OAuth callback: Invalid or unknown state.");
+
+          sendHTML(res, 400, `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>OAuth Error</title>
+              <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+                h1 { color: #cc0000; }
+              </style>
+            </head>
+            <body>
+              <div class="error-box">
+                <h1>OAuth Error</h1>
+                <p>Invalid or unrecognized state. Request rejected.</p>
+                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+              </div>
+            </body>
+            </html>
+          `);
+
+          return;
+        }
+
+        // Check if state has expired
+        if (isOAuthStateExpired(sessionData)) {
+          oauthSessions.delete(returnedState);
+
+          log("OAuth callback: State expired.");
+
+          sendHTML(res, 400, `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>OAuth Error</title>
+              <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+                h1 { color: #cc0000; }
+              </style>
+            </head>
+            <body>
+              <div class="error-box">
+                <h1>OAuth Error</h1>
+                <p>Authorization request expired. Please try again.</p>
+                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+              </div>
+            </body>
+            </html>
+          `);
+
+          return;
+        }
+
+        // Delete used state from map
+        oauthSessions.delete(returnedState);
+
+        // Exchange code for token (server-side)
         try {
+          const codeVerifier = sessionData.codeVerifier;
+
+          log(
+            `Exchanging authorization code for access token (state=${returnedState.substring(0, 8)}...)`
+          );
+
           const tokenData =
-            await exchangeOAuthCode(
-              code
+            await exchangeOAuthCodeForToken(
+              code,
+              codeVerifier
             );
 
-          /*
-           * OAuth tokens are kept in server memory.
-           * For a production system, use encrypted
-           * persistent storage.
-           */
-
+          // Store token in server memory
           state.oauth.token =
             tokenData.access_token ||
             tokenData.token ||
@@ -1368,7 +1577,7 @@ const server =
             );
 
           log(
-            "Deriv OAuth authentication completed successfully."
+            "Deriv OAuth 2.0 authentication completed successfully."
           );
 
           if (
@@ -1377,25 +1586,13 @@ const server =
             connectDerivWebSocket();
           }
 
-          sendJSON(res, 200, {
-            ok: true,
-
-            message:
-              "Deriv Connected",
-
-            oauth:
-              "Authentication completed successfully",
-
-            demoMode:
-              state.oauth.accountType ===
-              "demo",
-
-            tokenStored:
-              state.oauth.tokenStored,
-
-            next:
-              "You can close this page and return to GoldWebTrader."
+          // Redirect to dashboard
+          res.writeHead(302, {
+            Location:
+              "https://goldwebtrader-v2-api.onrender.com/"
           });
+
+          res.end();
 
         } catch (error) {
           log(
@@ -1403,18 +1600,34 @@ const server =
             error.message
           );
 
-          sendJSON(res, 500, {
-            ok: false,
-            error: error.message
-          });
+          sendHTML(res, 500, `
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <title>OAuth Error</title>
+              <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+                h1 { color: #cc0000; }
+              </style>
+            </head>
+            <body>
+              <div class="error-box">
+                <h1>OAuth Error</h1>
+                <p>${error.message}</p>
+                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+              </div>
+            </body>
+            </html>
+          `);
         }
 
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // AUTHENTICATED API ROUTES
-      // ------------------------------------------------------
+      // ======================================================
       if (!authorized(req)) {
         sendJSON(res, 401, {
           ok: false,
@@ -1425,9 +1638,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // STATUS
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "GET" &&
         (
@@ -1479,9 +1692,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // V75 ENGINE STATUS
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "GET" &&
         url === "/v75/engine/status"
@@ -1502,9 +1715,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // MARKET STATUS
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "GET" &&
         url === "/market"
@@ -1519,9 +1732,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // LOGS
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "GET" &&
         url === "/logs"
@@ -1534,9 +1747,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // ENGINE SETTINGS
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "POST" &&
         url === "/v75/engine/settings"
@@ -1615,9 +1828,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // ENGINE START
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "POST" &&
         url === "/v75/engine/start"
@@ -1638,9 +1851,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // ENGINE STOP
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "POST" &&
         url === "/v75/engine/stop"
@@ -1664,9 +1877,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // MANUAL CANDLE REFRESH
-      // ------------------------------------------------------
+      // ======================================================
       if (
         req.method === "POST" &&
         url === "/v75/engine/refresh"
@@ -1682,9 +1895,9 @@ const server =
         return;
       }
 
-      // ------------------------------------------------------
+      // ======================================================
       // 404
-      // ------------------------------------------------------
+      // ======================================================
       sendJSON(res, 404, {
         ok: false,
         error:
@@ -1781,7 +1994,7 @@ server.listen(
     );
 
     log(
-      "Waiting for Deriv OAuth connection..."
+      "Waiting for Deriv OAuth 2.0 connection..."
     );
   }
 );
