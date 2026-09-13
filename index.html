@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GoldWebTrader V2 — Mobile Dashboard</title>
+  <style>
+    :root {
+      --bg-color: #121214; --card-bg: #1a1a1e; --text-color: #e2e8f0; --text-muted: #94a3b8;
+      --primary: #f59e0b; --primary-hover: #d97706; --success: #10b981; --danger: #ef4444; --border: #2d2d34;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 15px; }
+    header { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid var(--border); }
+    h1 { margin: 0; font-size: 1.5rem; color: var(--primary); }
+    .subtitle { color: var(--text-muted); font-size: 0.85rem; margin: 0; }
+    .status-badge { align-self: flex-start; padding: 4px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: bold; background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+    .status-badge.connected { background: rgba(16, 185, 129, 0.15); color: var(--success); }
+    .btn-group { display: flex; gap: 8px; margin-top: 10px; }
+    button { background-color: var(--card-bg); color: var(--text-color); border: 1px solid var(--border); padding: 10px 16px; border-radius: 8px; font-weight: 600; font-size: 0.85rem; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+    button.btn-primary { background-color: var(--primary); color: #000; border: none; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 15px; }
+    @media (min-width: 600px) { .grid { grid-template-columns: 1fr 1fr; } }
+    .card { background-color: var(--card-bg); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+    .card h2 { margin-top: 0; font-size: 1.1rem; color: var(--primary); border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px dashed #2d2d34; font-size: 0.9rem; }
+    .row:last-child { border: none; }
+    .row .label { color: var(--text-muted); }
+    .row .value { font-weight: 600; }
+    .console { background-color: #000; border: 1px solid var(--border); font-family: monospace; font-size: 0.75rem; padding: 12px; border-radius: 8px; height: 180px; overflow-y: auto; color: #39ff14; }
+    .log-item { margin-bottom: 4px; line-height: 1.3; }
+    .log-time { color: var(--text-muted); }
+    .input-key { background: #000; color: #fff; border: 1px solid var(--border); padding: 8px; border-radius: 6px; font-size: 0.85rem; width: 100%; box-sizing: border-box; margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>GoldWebTrader V2</h1>
+    <p class="subtitle">Android-first Remote Control Dashboard</p>
+    <div id="conn-badge" class="status-badge">Disconnected</div>
+    <input type="password" id="api-key-input" class="input-key" placeholder="Enter X-API-Key (Optional Server Pass)">
+    <div class="btn-group">
+      <button class="btn-primary" onclick="initiateOAuth()">Deriv OAuth Login</button>
+      <button onclick="forceRefresh()">Manual Refresh</button>
+      <button onclick="clearSavedAuth()" style="color: var(--danger);">Clear Cache</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Connection Status & Account</h2>
+      <div class="row"><span class="label">Deriv Connection</span><span class="value" id="acc-connected">—</span></div>
+      <div class="row"><span class="label">Account Type</span><span class="value" id="acc-type">—</span></div>
+      <div class="row"><span class="label">Account Login ID</span><span class="value" id="acc-id">—</span></div>
+      <div class="row"><span class="label">WebSocket Status</span><span class="value" id="ws-status">—</span></div>
+      <div class="row"><span class="label">V75 (1s) Market Price</span><span class="value" id="market-price" style="color:var(--primary);">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Trading Engine Status</h2>
+      <div class="row"><span class="label">Engine State</span><span class="value" id="eng-status">—</span></div>
+      <div class="row"><span class="label">Auto Run Loop</span><span class="value" id="eng-enabled">—</span></div>
+      <div class="row"><span class="label">Execute Live Trades</span><span class="value" id="eng-execute">—</span></div>
+      <div class="row"><span class="label">Indicator Fast EMA</span><span class="value" id="ind-fast">—</span></div>
+      <div class="row"><span class="label">Indicator Slow EMA</span><span class="value" id="ind-slow">—</span></div>
+      <div class="row"><span class="label">Strategy RSI Status</span><span class="value" id="ind-rsi">—</span></div>
+      <div class="row"><span class="label">Latest Engine Signal</span><span class="value" id="eng-signal">—</span></div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top: 15px;">
+    <h2>Engine Remote Commands</h2>
+    <div class="btn-group">
+      <button onclick="postCommand('/v75/engine/start')">Start Engine Loop</button>
+      <button onclick="postCommand('/v75/engine/stop')">Stop Engine Loop</button>
+      <button onclick="postCommand('/v75/engine/refresh')">Refresh Market Candles</button>
+    </div>
+    <div class="btn-group" style="margin-top: 10px;">
+      <button onclick="toggleSetting('enabled')">Toggle Auto Run</button>
+      <button onclick="toggleSetting('executeTrades')" class="btn-primary">Toggle Live Execution</button>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top: 15px;">
+    <h2>Live Telemetry Logs</h2>
+    <div class="console" id="log-console">Fetching remote data logs...</div>
+  </div>
+
+  <script>
+    const BASE_API_URL = window.location.origin; 
+    let currentEngineState = {};
+
+    document.addEventListener("DOMContentLoaded", () => {
+      if(localStorage.getItem("dashboard_api_key")) {
+        document.getElementById("api-key-input").value = localStorage.getItem("dashboard_api_key");
+      }
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get("oauth_success") === "true") {
+        const token = urlParams.get("token"); const account = urlParams.get("account");
+        localStorage.setItem("deriv_token", token); localStorage.setItem("deriv_account", account);
+        appendLocalConsole("System Handshake Confirmed! Session variables saved into browser cache.");
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+      pollServerRuntimeState(); setInterval(pollServerRuntimeState, 3000);
+    });
+
+    function fetchHeaders() {
+      const headers = { "Content-Type": "application/json" };
+      const apiKey = document.getElementById("api-key-input").value;
+      if (apiKey) { headers["X-API-Key"] = apiKey; localStorage.setItem("dashboard_api_key", apiKey); }
+      return headers;
+    }
+
+    async function pollServerRuntimeState() {
+      const cachedToken = localStorage.getItem("deriv_token"); const cachedAccount = localStorage.getItem("deriv_account");
+      let url = `${BASE_API_URL}/status`;
+      if (cachedToken && cachedAccount) { url += `?token=${encodeURIComponent(cachedToken)}&account=${encodeURIComponent(cachedAccount)}`; }
+      try {
+        const response = await fetch(url, { method: "GET", headers: fetchHeaders() });
+        if (!response.ok) throw new Error(`HTTP Session Error: ${response.status}`);
+        const data = await response.json(); updateDashboardUserInterface(data);
+      } catch (err) {
+        document.getElementById("conn-badge").className = "status-badge"; document.getElementById("conn-badge").innerText = "Network Interrupted";
+      }
+      fetchLogsData();
+    }
+
+    function updateDashboardUserInterface(data) {
+      if (!data.ok) return;
+      const badge = document.getElementById("conn-badge"); currentEngineState = data.engine || {};
+      if (data.oauth && data.oauth.accountId && data.oauth.accountId !== "demo") {
+        badge.className = "status-badge connected"; badge.innerText = "Connected Profile Live";
+        document.getElementById("acc-connected").innerText = "Active Stream Established"; document.getElementById("acc-connected").style.color = "var(--success)";
+      } else {
+        badge.className = "status-badge"; badge.innerText = "Authentication Disconnected";
+        document.getElementById("acc-connected").innerText = "Disconnected"; document.getElementById("acc-connected").style.color = "var(--danger)";
+      }
+      document.getElementById("acc-type").innerText = data.oauth?.accountType || "—";
+      document.getElementById("acc-id").innerText = (data.oauth?.accountId && data.oauth.accountId !== "demo") ? data.oauth.accountId : "—";
+      document.getElementById("ws-status").innerText = data.websocket?.connected ? "Authenticated Streams Live" : "Offline";
+      document.getElementById("market-price").innerText = data.market?.price ? Number(data.market.price).toFixed(2) : "Fetching...";
+      document.getElementById("eng-status").innerText = data.engine?.status || "—";
+      document.getElementById("eng-enabled").innerText = data.engine?.enabled ? "ACTIVE AUTO RUN" : "STOPPED";
+      document.getElementById("eng-enabled").style.color = data.engine?.enabled ? "var(--success)" : "var(--danger)";
+      document.getElementById("eng-execute").innerText = data.engine?.executeTrades ? "LIVE LIVE LIVE" : "SIMULATION ONLY";
+      document.getElementById("eng-execute").style.color = data.engine?.executeTrades ? "var(--success)" : "var(--text-muted)";
+      document.getElementById("eng-signal").innerText = data.engine?.lastSignal || "WAITING";
+      fetchEngineDiagnostics();
+    }
+
+    async function fetchEngineDiagnostics() {
+      const cachedToken = localStorage.getItem("deriv_token"); const cachedAccount = localStorage.getItem("deriv_account");
+      let url = `${BASE_API_URL}/v75/engine/status`;
+      if (cachedToken && cachedAccount) { url += `?token=${encodeURIComponent(cachedToken)}&account=${encodeURIComponent(cachedAccount)}`; }
+      try {
+        const res = await fetch(url, { headers: fetchHeaders() }); const data = await res.json();
+        if(data.ok && data.indicators) {
+          document.getElementById("ind-fast").innerText = data.indicators.emaFast ? Number(data.indicators.emaFast).toFixed(2) : "—";
+          document.getElementById("ind-slow").innerText = data.indicators.emaSlow ? Number(data.indicators.emaSlow).toFixed(2) : "—";
+          document.getElementById("ind-rsi").innerText = data.indicators.rsi ? Number(data.indicators.rsi).toFixed(2) : "—";
+        }
+      } catch(e) {}
+    }
+
+    async function fetchLogsData() {
+      const cachedToken = localStorage.getItem("deriv_token"); const cachedAccount = localStorage.getItem("deriv_account");
+      let url = `${BASE_API_URL}/logs`;
+      if (cachedToken && cachedAccount) { url += `?token=${encodeURIComponent(cachedToken)}&account=${encodeURIComponent(cachedAccount)}`; }
+      try {
+        const res = await fetch(url, { headers: fetchHeaders() }); const data = await res.json();
+        if (data.ok && Array.isArray(data.logs)) {
+          const consoleBox = document.getElementById("log-console");
+          if(data.logs.length === 0) { consoleBox.innerHTML = '<div class="log-item">No tracking engine events registered yet.</div>'; return; }
+          consoleBox.innerHTML = data.logs.map(log => `<div class="log-item"><span class="log-time">[${log.time.substring(11, 19)}]</span> ${log.message}</div>`).join('');
+        }
+      } catch (err) {}
+    }
+
+    async function postCommand(endpoint, customPayload = {}) {
+      const cachedToken = localStorage.getItem("deriv_token"); const cachedAccount = localStorage.getItem("deriv_account");
+      let url = `${BASE_API_URL}${endpoint}`;
+      if (cachedToken && cachedAccount) { url += `?token=${encodeURIComponent(cachedToken)}&account=${encodeURIComponent(cachedAccount)}`; }
+      try {
+        const res = await fetch(url, { method: "POST", headers: fetchHeaders(), body: Object.keys(customPayload).length ? JSON.stringify(customPayload) : undefined });
+        const data = await res.json(); if(data.ok) appendLocalConsole(`Command [${endpoint}] accepted.`);
+        pollServerRuntimeState();
+      } catch(e) { appendLocalConsole(`Command deployment error to: ${endpoint}`); }
+    }
+
+    function toggleSetting(field) {
+      if(!currentEngineState || currentEngineState[field] === undefined) return;
+      const updatedPayload = {}; updatedPayload[field] = !currentEngineState[field];
+      postCommand('/v75/engine/settings', updatedPayload);
+    }
+
+    function initiateOAuth() { appendLocalConsole("Redirecting context out to secure Deriv authorization gateway..."); window.location.href = `${BASE_API_URL}/oauth/login`; }
+    function forceRefresh() { appendLocalConsole("Forcing manual state poll refresh cycle..."); pollServerRuntimeState(); }
+    function clearSavedAuth() { localStorage.removeItem("deriv_token"); localStorage.removeItem("deriv_account"); appendLocalConsole("Browser authorization cache keys wiped clean. Disconnecting UI state."); window.location.reload(); }
+    function appendLocalConsole(msg) { const box = document.getElementById("log-console"); const timeStr = new Date().toISOString().substring(11, 19); box.innerHTML = `<div class="log-item" style="color: #00ffff;"><span class="log-time">[${timeStr}]</span> ${msg}</div>` + box.innerHTML; }
+  </script>
+</body>
+</html>
