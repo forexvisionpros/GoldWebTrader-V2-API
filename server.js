@@ -65,7 +65,9 @@ const state = {
     connected: false,
     accountType: "demo",
     loginid: null,
-    tokenStored: false
+    tokenStored: false,
+    token: null,
+    accountId: null
   },
 
   market: {
@@ -109,7 +111,8 @@ const state = {
   websocket: {
     connected: false,
     authenticated: false,
-    error: null
+    error: null,
+    url: null
   },
 
   candles: [],
@@ -401,6 +404,61 @@ async function exchangeOAuthCodeForToken(code, codeVerifier) {
 }
 
 // ============================================================
+// DERIV OPTIONS API OTP RETRIEVAL
+// ============================================================
+
+/**
+ * Request an OTP (One-Time Password) for authenticated WebSocket connection.
+ * Uses the OAuth access token to get a fresh OTP URL.
+ */
+async function requestV75WebSocketOTP() {
+  if (!state.oauth.token) {
+    log("Cannot request OTP: No OAuth token available.");
+    return null;
+  }
+
+  if (!state.oauth.accountId) {
+    log("Cannot request OTP: No account ID available.");
+    return null;
+  }
+
+  log("Requesting V75 WebSocket OTP...");
+
+  try {
+    const accountId = state.oauth.accountId;
+    const url = `${DERIV_API}/trading/v1/options/accounts/${accountId}/otp`;
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${state.oauth.token}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || data.error) {
+      const errorMsg = data.error?.message || data.error || "OTP request failed";
+      log(`V75 WebSocket OTP request failed: HTTP ${response.status} - ${errorMsg}`);
+      return null;
+    }
+
+    if (!data.data || !data.data.url) {
+      log("V75 WebSocket OTP response missing URL.");
+      return null;
+    }
+
+    log("V75 WebSocket OTP received.");
+
+    return data.data.url;
+  } catch (error) {
+    log(`V75 WebSocket OTP request error: ${error.message}`);
+    return null;
+  }
+}
+
+// ============================================================
 // DERIV WEBSOCKET
 // ============================================================
 
@@ -408,39 +466,52 @@ let ws = null;
 let reconnectTimer = null;
 let connecting = false;
 
-function connectDerivWebSocket() {
+async function connectDerivWebSocket() {
   if (connecting) return;
 
-  if (!state.oauth.tokenStored) {
-    log("Waiting for Deriv OAuth token.");
+  if (!state.oauth.tokenStored || !state.oauth.accountId) {
+    log("Waiting for Deriv OAuth token and account ID.");
     return;
   }
 
   connecting = true;
 
   try {
-    const WebSocket =
-      require("ws");
+    // Request OTP for authenticated connection
+    const otpUrl = await requestV75WebSocketOTP();
 
-    ws = new WebSocket(
-      "wss://ws.derivws.com/websockets/v3"
-    );
+    if (!otpUrl) {
+      connecting = false;
+      scheduleReconnect();
+      return;
+    }
+
+    const WebSocket = require("ws");
+
+    log("Connecting to V75 authenticated WebSocket...");
+
+    state.websocket.url = otpUrl;
+
+    ws = new WebSocket(otpUrl);
 
     ws.onopen = () => {
-      log("Deriv WebSocket connected.");
+      log("V75 authenticated WebSocket connected successfully.");
 
       state.websocket.connected = true;
+      state.websocket.authenticated = true;
+      state.market.connected = true;
       state.websocket.error = null;
 
       connecting = false;
 
-      authenticateWebSocket();
+      // Start market data subscriptions
+      subscribeToMarket();
+      requestCandles();
     };
 
     ws.onmessage = event => {
       try {
-        const message =
-          JSON.parse(event.data);
+        const message = JSON.parse(event.data);
 
         handleDerivMessage(message);
       } catch (error) {
@@ -459,16 +530,13 @@ function connectDerivWebSocket() {
 
       state.websocket.connected = false;
       state.market.connected = false;
-      state.websocket.error =
-        "WebSocket connection error";
+      state.websocket.error = "WebSocket connection error";
 
       connecting = false;
     };
 
     ws.onclose = () => {
-      log(
-        "V75 authenticated WebSocket closed."
-      );
+      log("V75 authenticated WebSocket closed.");
 
       state.websocket.connected = false;
       state.websocket.authenticated = false;
@@ -482,8 +550,7 @@ function connectDerivWebSocket() {
   } catch (error) {
     connecting = false;
 
-    state.websocket.error =
-      error.message;
+    state.websocket.error = error.message;
 
     log(
       "WebSocket startup error: " +
@@ -495,13 +562,14 @@ function connectDerivWebSocket() {
 }
 
 // ============================================================
-// RECONNECT
+// RECONNECT WITH CONTROLLED BACKOFF
 // ============================================================
 function scheduleReconnect() {
   if (reconnectTimer) {
     return;
   }
 
+  // Controlled 5-second reconnect
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
 
@@ -510,32 +578,12 @@ function scheduleReconnect() {
 }
 
 // ============================================================
-// AUTHENTICATE
-// ============================================================
-function authenticateWebSocket() {
-  if (!ws) return;
-
-  // Token is stored in memory after OAuth.
-  if (!state.oauth.token) {
-    log("No OAuth token available.");
-    return;
-  }
-
-  ws.send(
-    JSON.stringify({
-      authorize: state.oauth.token
-    })
-  );
-}
-
-// ============================================================
 // REQUEST TICKS
 // ============================================================
 function subscribeToMarket() {
   if (
     !ws ||
-    state.websocket.authenticated
-      !== true
+    state.websocket.authenticated !== true
   ) {
     return;
   }
@@ -558,26 +606,18 @@ function subscribeToMarket() {
 function requestCandles() {
   if (
     !ws ||
-    state.websocket.authenticated
-      !== true
+    state.websocket.authenticated !== true
   ) {
     return;
   }
 
   ws.send(
     JSON.stringify({
-      ticks_history:
-        state.engine.symbol,
-
+      ticks_history: state.engine.symbol,
       adjust_start_time: 1,
-
       count: 100,
-
       end: "latest",
-
-      granularity:
-        state.engine.timeframeSeconds,
-
+      granularity: state.engine.timeframeSeconds,
       style: "candles"
     })
   );
@@ -600,37 +640,6 @@ function handleDerivMessage(message) {
     state.market.error =
       message.error.message ||
       "Deriv API error";
-
-    return;
-  }
-
-  // ----------------------------------------------------------
-  // AUTHORIZATION
-  // ----------------------------------------------------------
-  if (message.msg_type === "authorize") {
-    state.websocket.authenticated =
-      true;
-
-    state.oauth.connected = true;
-    state.oauth.loginid =
-      message.authorize?.loginid ||
-      null;
-
-    state.oauth.accountType =
-      message.authorize?.is_virtual
-        ? "demo"
-        : "real";
-
-    state.market.error = null;
-
-    log(
-      `Deriv authenticated: ${
-        state.oauth.loginid || "unknown"
-      }`
-    );
-
-    subscribeToMarket();
-    requestCandles();
 
     return;
   }
@@ -669,34 +678,22 @@ function handleDerivMessage(message) {
       state.candles =
         message.candles
           .map(candle => ({
-            epoch:
-              Number(candle.epoch),
-
-            open:
-              Number(candle.open),
-
-            high:
-              Number(candle.high),
-
-            low:
-              Number(candle.low),
-
-            close:
-              Number(candle.close)
+            epoch: Number(candle.epoch),
+            open: Number(candle.open),
+            high: Number(candle.high),
+            low: Number(candle.low),
+            close: Number(candle.close)
           }))
           .filter(
             candle =>
-              Number.isFinite(
-                candle.close
-              )
+              Number.isFinite(candle.close)
           );
 
       if (
         state.candles.length >=
         state.engine.emaSlow + 5
       ) {
-        state.engine.status =
-          "READY";
+        state.engine.status = "READY";
       }
 
       log(
@@ -727,14 +724,22 @@ function handleDerivMessage(message) {
     if (
       pendingProposalRequest.contract_type &&
       proposal.contract_type &&
-      pendingProposalRequest.contract_type !== proposal.contract_type
+      pendingProposalRequest.contract_type !==
+      proposal.contract_type
     ) {
       // mismatch - ignore
       return;
     }
 
     const proposalId = proposal.id;
-    const askPrice = Number(proposal.ask_price || proposal.ask_price_raw || proposal.ask_price_display || proposal.display_value || 0) || Number(proposal.ask_price || 0);
+    const askPrice =
+      Number(
+        proposal.ask_price ||
+        proposal.ask_price_raw ||
+        proposal.ask_price_display ||
+        proposal.display_value ||
+        0
+      ) || Number(proposal.ask_price || 0);
 
     // send buy request using proposal id and ask price
     if (ws && state.websocket.authenticated) {
@@ -746,14 +751,21 @@ function handleDerivMessage(message) {
           })
         );
 
-        log(`Sent BUY request for proposal ${proposalId} (price=${askPrice})`);
+        log(
+          `Sent BUY request for proposal ${proposalId} (price=${askPrice})`
+        );
 
         // store the last proposal id on pending object for matching the buy response
-        pendingProposalRequest.proposal_id = proposalId;
-        pendingProposalRequest.ask_price = askPrice;
+        pendingProposalRequest.proposal_id =
+          proposalId;
+        pendingProposalRequest.ask_price =
+          askPrice;
 
       } catch (err) {
-        log("Error sending buy request: " + err.message);
+        log(
+          "Error sending buy request: " +
+          err.message
+        );
         pendingProposalRequest = null;
       }
     }
@@ -769,22 +781,33 @@ function handleDerivMessage(message) {
 
     if (!buy) return;
 
-    const contractId = buy.contract_id || buy.contract_id || null;
+    const contractId =
+      buy.contract_id || buy.contract_id || null;
 
     if (!contractId) return;
 
     // If we don't have a pending request or proposal, still record but ensure single active trade rule
     if (activeContractId) {
-      log("Received buy for contract while another active contract exists. Ignoring.");
+      log(
+        "Received buy for contract while another active contract exists. Ignoring."
+      );
       return;
     }
 
     // Create a new position entry and mark activeContractId
     const position = {
       contractId,
-      contract_type: pendingProposalRequest?.contract_type || (buy.contract_type || null),
-      stake: pendingProposalRequest?.stake || Number(buy.buy_price || buy.purchase) || state.engine.demoStake,
-      buy_price: pendingProposalRequest?.ask_price || Number(buy.buy_price || buy.purchase) || null,
+      contract_type:
+        pendingProposalRequest?.contract_type ||
+        (buy.contract_type || null),
+      stake:
+        pendingProposalRequest?.stake ||
+        Number(buy.buy_price || buy.purchase) ||
+        state.engine.demoStake,
+      buy_price:
+        pendingProposalRequest?.ask_price ||
+        Number(buy.buy_price || buy.purchase) ||
+        null,
       payout: null,
       profit: null,
       result: null,
@@ -809,9 +832,14 @@ function handleDerivMessage(message) {
           })
         );
 
-        log(`Subscribed to proposal_open_contract for ${contractId}`);
+        log(
+          `Subscribed to proposal_open_contract for ${contractId}`
+        );
       } catch (err) {
-        log("Error subscribing to proposal_open_contract: " + err.message);
+        log(
+          "Error subscribing to proposal_open_contract: " +
+          err.message
+        );
       }
     }
 
@@ -834,17 +862,26 @@ function handleDerivMessage(message) {
     if (!cid) return;
 
     // find the position
-    const position = state.positions.find(p => p.contractId === cid);
+    const position = state.positions.find(
+      p => p.contractId === cid
+    );
 
     if (!position) return;
 
     // update position with incoming fields
-    position.payout = Number(open.payout || position.payout || 0);
-    position.profit = Number(open.profit || position.profit || 0);
-    position.is_sold = Boolean(open.is_sold || position.is_sold);
+    position.payout = Number(
+      open.payout || position.payout || 0
+    );
+    position.profit = Number(
+      open.profit || position.profit || 0
+    );
+    position.is_sold = Boolean(
+      open.is_sold || position.is_sold
+    );
 
     if (open.transaction_ids) {
-      position.transaction_ids = open.transaction_ids;
+      position.transaction_ids =
+        open.transaction_ids;
     }
 
     if (position.is_sold) {
@@ -859,7 +896,9 @@ function handleDerivMessage(message) {
         position.result = "BREAKEVEN";
       }
 
-      log(`Contract ${cid} closed. Result=${position.result} Profit=${position.profit}`);
+      log(
+        `Contract ${cid} closed. Result=${position.result} Profit=${position.profit}`
+      );
 
       // clear activeContractId so new trades can be placed
       if (activeContractId === cid) {
@@ -884,32 +923,18 @@ function calculateEMA(values, period) {
     return null;
   }
 
-  const multiplier =
-    2 / (period + 1);
+  const multiplier = 2 / (period + 1);
 
   let ema = 0;
 
-  for (
-    let i = 0;
-    i < period;
-    i++
-  ) {
+  for (let i = 0; i < period; i++) {
     ema += values[i];
   }
 
   ema /= period;
 
-  for (
-    let i = period;
-    i < values.length;
-    i++
-  ) {
-    ema =
-      (
-        values[i] - ema
-      ) *
-      multiplier +
-      ema;
+  for (let i = period; i < values.length; i++) {
+    ema = (values[i] - ema) * multiplier + ema;
   }
 
   return ema;
@@ -929,13 +954,8 @@ function calculateRSI(values, period) {
   let gains = 0;
   let losses = 0;
 
-  for (
-    let i = 1;
-    i <= period;
-    i++
-  ) {
-    const change =
-      values[i] - values[i - 1];
+  for (let i = 1; i <= period; i++) {
+    const change = values[i] - values[i - 1];
 
     if (change >= 0) {
       gains += change;
@@ -944,78 +964,44 @@ function calculateRSI(values, period) {
     }
   }
 
-  let averageGain =
-    gains / period;
+  let averageGain = gains / period;
 
-  let averageLoss =
-    losses / period;
+  let averageLoss = losses / period;
 
-  for (
-    let i = period + 1;
-    i < values.length;
-    i++
-  ) {
-    const change =
-      values[i] - values[i - 1];
+  for (let i = period + 1; i < values.length; i++) {
+    const change = values[i] - values[i - 1];
 
-    const gain =
-      change > 0
-        ? change
-        : 0;
+    const gain = change > 0 ? change : 0;
 
-    const loss =
-      change < 0
-        ? Math.abs(change)
-        : 0;
+    const loss = change < 0 ? Math.abs(change) : 0;
 
     averageGain =
-      (
-        averageGain *
-        (period - 1) +
-        gain
-      ) /
-      period;
+      (averageGain * (period - 1) + gain) / period;
 
     averageLoss =
-      (
-        averageLoss *
-        (period - 1) +
-        loss
-      ) /
-      period;
+      (averageLoss * (period - 1) + loss) / period;
   }
 
   if (averageLoss === 0) {
     return 100;
   }
 
-  const rs =
-    averageGain /
-    averageLoss;
+  const rs = averageGain / averageLoss;
 
-  return 100 -
-    100 /
-      (1 + rs);
+  return 100 - 100 / (1 + rs);
 }
 
 // ============================================================
 // MOMENTUM
 // ============================================================
-function calculateMomentum(
-  values,
-  bars
-) {
-  if (
-    values.length <= bars
-  ) {
+function calculateMomentum(values, bars) {
+  if (values.length <= bars) {
     return 0;
   }
 
   return (
     values[values.length - 1] -
-    values[
-      values.length - 1 - bars
-    ]
+    values[values.length - 1 - bars]
   );
 }
 
@@ -1025,8 +1011,7 @@ function calculateMomentum(
 
 function evaluateEngine() {
   if (!state.engine.enabled) {
-    state.engine.status =
-      "DISABLED";
+    state.engine.status = "DISABLED";
 
     return;
   }
@@ -1035,48 +1020,28 @@ function evaluateEngine() {
     state.candles.length <
     state.engine.emaSlow + 5
   ) {
-    state.engine.status =
-      "WAITING_FOR_DATA";
+    state.engine.status = "WAITING_FOR_DATA";
 
     return;
   }
 
-  const closes =
-    state.candles.map(
-      candle => candle.close
-    );
+  const closes = state.candles.map(
+    candle => candle.close
+  );
 
-  const emaFast =
-    calculateEMA(
-      closes,
-      state.engine.emaFast
-    );
+  const emaFast = calculateEMA(closes, state.engine.emaFast);
 
-  const emaSlow =
-    calculateEMA(
-      closes,
-      state.engine.emaSlow
-    );
+  const emaSlow = calculateEMA(closes, state.engine.emaSlow);
 
-  const rsi =
-    calculateRSI(
-      closes,
-      state.engine.rsiLength
-    );
+  const rsi = calculateRSI(closes, state.engine.rsiLength);
 
-  const momentum =
-    calculateMomentum(
-      closes,
-      state.engine.momentumBars
-    );
+  const momentum = calculateMomentum(
+    closes,
+    state.engine.momentumBars
+  );
 
-  if (
-    emaFast === null ||
-    emaSlow === null ||
-    rsi === null
-  ) {
-    state.engine.status =
-      "WAITING_FOR_INDICATORS";
+  if (emaFast === null || emaSlow === null || rsi === null) {
+    state.engine.status = "WAITING_FOR_INDICATORS";
 
     return;
   }
@@ -1106,15 +1071,12 @@ function evaluateEngine() {
   }
 
   state.engine.status =
-    signal === "WAIT"
-      ? "WAITING"
-      : "SIGNAL";
+    signal === "WAIT" ? "WAITING" : "SIGNAL";
 
   if (signal !== "WAIT") {
     processSignal({
       signal,
-      price:
-        closes[closes.length - 1],
+      price: closes[closes.length - 1],
       emaFast,
       emaSlow,
       rsi,
@@ -1133,13 +1095,10 @@ function processSignal(data) {
   // Cooldown
   if (
     state.engine.lastSignalTime &&
-    now -
-      state.engine.lastSignalTime <
-      state.engine.cooldownSeconds *
-        1000
+    now - state.engine.lastSignalTime <
+    state.engine.cooldownSeconds * 1000
   ) {
-    state.engine.status =
-      "COOLDOWN";
+    state.engine.status = "COOLDOWN";
 
     return;
   }
@@ -1149,17 +1108,14 @@ function processSignal(data) {
     state.engine.signalsToday >=
     state.engine.maxSignals
   ) {
-    state.engine.status =
-      "MAX_SIGNALS_REACHED";
+    state.engine.status = "MAX_SIGNALS_REACHED";
 
     return;
   }
 
-  state.engine.lastSignal =
-    data.signal;
+  state.engine.lastSignal = data.signal;
 
-  state.engine.lastSignalTime =
-    now;
+  state.engine.lastSignalTime = now;
 
   state.engine.signalsToday++;
 
@@ -1247,714 +1203,590 @@ async function executeTrade(data) {
 // HTTP SERVER
 // ============================================================
 
-const server =
-  http.createServer(
-    async (req, res) => {
-
-      // ======================================================
-      // CORS PREFLIGHT
-      // ======================================================
-      if (req.method === "OPTIONS") {
-        res.writeHead(204, {
-          "Access-Control-Allow-Origin":
-            "*",
-
-          "Access-Control-Allow-Headers":
-            "Content-Type, Authorization, X-API-Key",
-
-          "Access-Control-Allow-Methods":
-            "GET, POST, OPTIONS"
-        });
-
-        res.end();
-        return;
-      }
-
-      const url =
-        req.url.split("?")[0];
-
-      // ======================================================
-      // ROOT — SERVE index.html
-      // ======================================================
-      if (
-        req.method === "GET" &&
-        url === "/"
-      ) {
-        if (indexHtmlCache) {
-          sendHTML(res, 200, indexHtmlCache);
-          return;
-        }
-
-        if (indexHtmlError) {
-          sendJSON(res, 500, {
-            ok: false,
-            error: indexHtmlError
-          });
-          return;
-        }
-
-        // Fallback: try to load it now
-        try {
-          const indexPath = path.join(__dirname, "index.html");
-          const html = fs.readFileSync(indexPath, "utf-8");
-          sendHTML(res, 200, html);
-          return;
-        } catch (err) {
-          sendJSON(res, 500, {
-            ok: false,
-            error: `Failed to read index.html: ${err.message}`
-          });
-          return;
-        }
-      }
-
-      // ======================================================
-      // HEALTH
-      // ======================================================
-      if (
-        req.method === "GET" &&
-        url === "/health"
-      ) {
-        sendJSON(res, 200, {
-          ok: true,
-          server: "online",
-          uptime: process.uptime(),
-          time:
-            new Date().toISOString()
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // OAUTH LOGIN
-      // ======================================================
-      if (
-        req.method === "GET" &&
-        url === "/oauth/login"
-      ) {
-        try {
-          const oauthData =
-            buildOAuthAuthorizationURL();
-
-          log(
-            `OAuth flow initiated with state=${oauthData.state.substring(0, 8)}...`
-          );
-
-          res.writeHead(302, {
-            Location: oauthData.url
-          });
-
-          res.end();
-
-        } catch (error) {
-          log(`OAuth login error: ${error.message}`);
-
-          sendHTML(res, 500, `
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>OAuth Error</title>
-              <style>
-                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
-                h1 { color: #cc0000; }
-              </style>
-            </head>
-            <body>
-              <div class="error-box">
-                <h1>OAuth Error</h1>
-                <p>${error.message}</p>
-                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
-              </div>
-            </body>
-            </html>
-          `);
-        }
-
-        return;
-      }
-
-      // ======================================================
-      // OAUTH CALLBACK
-      // ======================================================
-      if (
-        req.method === "GET" &&
-        url === "/oauth/callback"
-      ) {
-        const params =
-          queryParams(req.url);
-
-        const code =
-          params.code;
-
-        const returnedState =
-          params.state;
-
-        const oauthError =
-          params.error;
-
-        const oauthErrorDesc =
-          params.error_description;
-
-        // Handle Deriv OAuth error
-        if (oauthError) {
-          log(
-            `OAuth error from Deriv: ${oauthError} - ${oauthErrorDesc || "no description"}`
-          );
-
-          sendHTML(res, 400, `
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>OAuth Error</title>
-              <style>
-                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
-                h1 { color: #cc0000; }
-              </style>
-            </head>
-            <body>
-              <div class="error-box">
-                <h1>OAuth Error</h1>
-                <p><strong>${oauthError}</strong></p>
-                <p>${oauthErrorDesc || "An error occurred during authentication."}</p>
-                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
-              </div>
-            </body>
-            </html>
-          `);
-
-          return;
-        }
-
-        // Check for authorization code
-        if (!code) {
-          log("OAuth callback: Authorization code missing.");
-
-          sendHTML(res, 400, `
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>OAuth Error</title>
-              <style>
-                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
-                h1 { color: #cc0000; }
-              </style>
-            </head>
-            <body>
-              <div class="error-box">
-                <h1>OAuth Error</h1>
-                <p>Authorization code missing from callback.</p>
-                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
-              </div>
-            </body>
-            </html>
-          `);
-
-          return;
-        }
-
-        // Validate state
-        if (!returnedState) {
-          log("OAuth callback: State parameter missing.");
-
-          sendHTML(res, 400, `
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>OAuth Error</title>
-              <style>
-                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
-                h1 { color: #cc0000; }
-              </style>
-            </head>
-            <body>
-              <div class="error-box">
-                <h1>OAuth Error</h1>
-                <p>State parameter missing. Invalid request.</p>
-                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
-              </div>
-            </body>
-            </html>
-          `);
-
-          return;
-        }
-
-        const sessionData = oauthSessions.get(returnedState);
-
-        if (!sessionData) {
-          log("OAuth callback: Invalid or unknown state.");
-
-          sendHTML(res, 400, `
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>OAuth Error</title>
-              <style>
-                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
-                h1 { color: #cc0000; }
-              </style>
-            </head>
-            <body>
-              <div class="error-box">
-                <h1>OAuth Error</h1>
-                <p>Invalid or unrecognized state. Request rejected.</p>
-                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
-              </div>
-            </body>
-            </html>
-          `);
-
-          return;
-        }
-
-        // Check if state has expired
-        if (isOAuthStateExpired(sessionData)) {
-          oauthSessions.delete(returnedState);
-
-          log("OAuth callback: State expired.");
-
-          sendHTML(res, 400, `
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>OAuth Error</title>
-              <style>
-                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
-                h1 { color: #cc0000; }
-              </style>
-            </head>
-            <body>
-              <div class="error-box">
-                <h1>OAuth Error</h1>
-                <p>Authorization request expired. Please try again.</p>
-                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
-              </div>
-            </body>
-            </html>
-          `);
-
-          return;
-        }
-
-        // Delete used state from map
-        oauthSessions.delete(returnedState);
-
-        // Exchange code for token (server-side)
-        try {
-          const codeVerifier = sessionData.codeVerifier;
-
-          log(
-            `Exchanging authorization code for access token (state=${returnedState.substring(0, 8)}...)`
-          );
-
-          const tokenData =
-            await exchangeOAuthCodeForToken(
-              code,
-              codeVerifier
-            );
-
-          // Store token in server memory
-          state.oauth.token =
-            tokenData.access_token ||
-            tokenData.token ||
-            null;
-
-          state.oauth.tokenStored =
-            Boolean(
-              state.oauth.token
-            );
-
-          state.oauth.connected =
-            Boolean(
-              state.oauth.token
-            );
-
-          log(
-            "Deriv OAuth 2.0 authentication completed successfully."
-          );
-
-          if (
-            state.oauth.tokenStored
-          ) {
-            connectDerivWebSocket();
-          }
-
-          // Redirect to dashboard
-          res.writeHead(302, {
-            Location:
-              "https://goldwebtrader-v2-api.onrender.com/"
-          });
-
-          res.end();
-
-        } catch (error) {
-          log(
-            "OAuth callback error: " +
-            error.message
-          );
-
-          sendHTML(res, 500, `
-            <!DOCTYPE html>
-            <html>
-            <head>
-              <title>OAuth Error</title>
-              <style>
-                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-                .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
-                h1 { color: #cc0000; }
-              </style>
-            </head>
-            <body>
-              <div class="error-box">
-                <h1>OAuth Error</h1>
-                <p>${error.message}</p>
-                <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
-              </div>
-            </body>
-            </html>
-          `);
-        }
-
-        return;
-      }
-
-      // ======================================================
-      // AUTHENTICATED API ROUTES
-      // ======================================================
-      if (!authorized(req)) {
-        sendJSON(res, 401, {
-          ok: false,
-          error:
-            "Unauthorized. Invalid API key."
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // STATUS
-      // ======================================================
-      if (
-        req.method === "GET" &&
-        (
-          url === "/status" ||
-          url === "/api/status" ||
-          url === "/v75/status"
-        )
-      ) {
-        sendJSON(res, 200, {
-          ok: true,
-
-          server:
-            state.server,
-
-          oauth: {
-            connected:
-              state.oauth.connected,
-
-            accountType:
-              state.oauth.accountType,
-
-            loginid:
-              state.oauth.loginid,
-
-            tokenStored:
-              state.oauth.tokenStored
-          },
-
-          websocket:
-            state.websocket,
-
-          market:
-            state.market,
-
-          engine:
-            {
-              ...state.engine,
-              tokenStored:
-                undefined
-            },
-
-          candles:
-            state.candles.length,
-
-          positions:
-            state.positions.length
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // V75 ENGINE STATUS
-      // ======================================================
-      if (
-        req.method === "GET" &&
-        url === "/v75/engine/status"
-      ) {
-        sendJSON(res, 200, {
-          ok: true,
-
-          engine:
-            state.engine,
-
-          market:
-            state.market,
-
-          indicators:
-            getIndicatorSnapshot()
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // MARKET STATUS
-      // ======================================================
-      if (
-        req.method === "GET" &&
-        url === "/market"
-      ) {
-        sendJSON(res, 200, {
-          ok: true,
-          market: state.market,
-          candles:
-            state.candles.length
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // LOGS
-      // ======================================================
-      if (
-        req.method === "GET" &&
-        url === "/logs"
-      ) {
-        sendJSON(res, 200, {
-          ok: true,
-          logs: state.logs
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // ENGINE SETTINGS
-      // ======================================================
-      if (
-        req.method === "POST" &&
-        url === "/v75/engine/settings"
-      ) {
-        const body =
-          await readBody(req);
-
-        if (
-          typeof body.enabled ===
-          "boolean"
-        ) {
-          state.engine.enabled =
-            body.enabled;
-        }
-
-        if (
-          typeof body.executeTrades ===
-          "boolean"
-        ) {
-          state.engine.executeTrades =
-            body.executeTrades;
-        }
-
-        if (
-          Number.isFinite(
-            Number(body.cooldownSeconds)
-          )
-        ) {
-          state.engine.cooldownSeconds =
-            Math.max(
-              0,
-              Number(
-                body.cooldownSeconds
-              )
-            );
-        }
-
-        if (
-          Number.isFinite(
-            Number(body.maxSignals)
-          )
-        ) {
-          state.engine.maxSignals =
-            Math.max(
-              1,
-              Number(
-                body.maxSignals
-              )
-            );
-        }
-
-        if (
-          Number.isFinite(
-            Number(body.demoStake)
-          )
-        ) {
-          state.engine.demoStake =
-            Math.max(
-              0.35,
-              Number(
-                body.demoStake
-              )
-            );
-        }
-
-        log(
-          "V75 engine settings updated."
-        );
-
-        sendJSON(res, 200, {
-          ok: true,
-          engine:
-            state.engine
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // ENGINE START
-      // ======================================================
-      if (
-        req.method === "POST" &&
-        url === "/v75/engine/start"
-      ) {
-        state.engine.enabled =
-          true;
-
-        log(
-          "V75 engine STARTED."
-        );
-
-        sendJSON(res, 200, {
-          ok: true,
-          status:
-            state.engine.status
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // ENGINE STOP
-      // ======================================================
-      if (
-        req.method === "POST" &&
-        url === "/v75/engine/stop"
-      ) {
-        state.engine.enabled =
-          false;
-
-        state.engine.status =
-          "DISABLED";
-
-        log(
-          "V75 engine STOPPED."
-        );
-
-        sendJSON(res, 200, {
-          ok: true,
-          status:
-            state.engine.status
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // MANUAL CANDLE REFRESH
-      // ======================================================
-      if (
-        req.method === "POST" &&
-        url === "/v75/engine/refresh"
-      ) {
-        requestCandles();
-
-        sendJSON(res, 200, {
-          ok: true,
-          message:
-            "Candle refresh requested."
-        });
-
-        return;
-      }
-
-      // ======================================================
-      // 404
-      // ======================================================
-      sendJSON(res, 404, {
-        ok: false,
-        error:
-          "Not found",
-        path: url
-      });
+const server = http.createServer(async (req, res) => {
+
+  // ======================================================
+  // CORS PREFLIGHT
+  // ======================================================
+  if (req.method === "OPTIONS") {
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers":
+        "Content-Type, Authorization, X-API-Key",
+      "Access-Control-Allow-Methods":
+        "GET, POST, OPTIONS"
+    });
+
+    res.end();
+    return;
+  }
+
+  const url = req.url.split("?")[0];
+
+  // ======================================================
+  // ROOT — SERVE index.html
+  // ======================================================
+  if (req.method === "GET" && url === "/") {
+    if (indexHtmlCache) {
+      sendHTML(res, 200, indexHtmlCache);
+      return;
     }
-  );
+
+    if (indexHtmlError) {
+      sendJSON(res, 500, {
+        ok: false,
+        error: indexHtmlError
+      });
+      return;
+    }
+
+    // Fallback: try to load it now
+    try {
+      const indexPath = path.join(__dirname, "index.html");
+      const html = fs.readFileSync(indexPath, "utf-8");
+      sendHTML(res, 200, html);
+      return;
+    } catch (err) {
+      sendJSON(res, 500, {
+        ok: false,
+        error: `Failed to read index.html: ${err.message}`
+      });
+      return;
+    }
+  }
+
+  // ======================================================
+  // HEALTH
+  // ======================================================
+  if (req.method === "GET" && url === "/health") {
+    sendJSON(res, 200, {
+      ok: true,
+      server: "online",
+      uptime: process.uptime(),
+      time: new Date().toISOString()
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // OAUTH LOGIN
+  // ======================================================
+  if (req.method === "GET" && url === "/oauth/login") {
+    try {
+      const oauthData = buildOAuthAuthorizationURL();
+
+      log(
+        `OAuth flow initiated with state=${oauthData.state.substring(0, 8)}...`
+      );
+
+      res.writeHead(302, {
+        Location: oauthData.url
+      });
+
+      res.end();
+
+    } catch (error) {
+      log(`OAuth login error: ${error.message}`);
+
+      sendHTML(res, 500, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>OAuth Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+            h1 { color: #cc0000; }
+          </style>
+        </head>
+        <body>
+          <div class="error-box">
+            <h1>OAuth Error</h1>
+            <p>${error.message}</p>
+            <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    return;
+  }
+
+  // ======================================================
+  // OAUTH CALLBACK
+  // ======================================================
+  if (req.method === "GET" && url === "/oauth/callback") {
+    const params = queryParams(req.url);
+
+    const code = params.code;
+
+    const returnedState = params.state;
+
+    const oauthError = params.error;
+
+    const oauthErrorDesc =
+      params.error_description;
+
+    // Handle Deriv OAuth error
+    if (oauthError) {
+      log(
+        `OAuth error from Deriv: ${oauthError} - ${oauthErrorDesc || "no description"}`
+      );
+
+      sendHTML(res, 400, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>OAuth Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+            h1 { color: #cc0000; }
+          </style>
+        </head>
+        <body>
+          <div class="error-box">
+            <h1>OAuth Error</h1>
+            <p><strong>${oauthError}</strong></p>
+            <p>${oauthErrorDesc || "An error occurred during authentication."}</p>
+            <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+          </div>
+        </body>
+        </html>
+      `);
+
+      return;
+    }
+
+    // Check for authorization code
+    if (!code) {
+      log("OAuth callback: Authorization code missing.");
+
+      sendHTML(res, 400, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>OAuth Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+            h1 { color: #cc0000; }
+          </style>
+        </head>
+        <body>
+          <div class="error-box">
+            <h1>OAuth Error</h1>
+            <p>Authorization code missing from callback.</p>
+            <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+          </div>
+        </body>
+        </html>
+      `);
+
+      return;
+    }
+
+    // Validate state
+    if (!returnedState) {
+      log("OAuth callback: State parameter missing.");
+
+      sendHTML(res, 400, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>OAuth Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+            h1 { color: #cc0000; }
+          </style>
+        </head>
+        <body>
+          <div class="error-box">
+            <h1>OAuth Error</h1>
+            <p>State parameter missing. Invalid request.</p>
+            <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+          </div>
+        </body>
+        </html>
+      `);
+
+      return;
+    }
+
+    const sessionData = oauthSessions.get(returnedState);
+
+    if (!sessionData) {
+      log("OAuth callback: Invalid or unknown state.");
+
+      sendHTML(res, 400, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>OAuth Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+            h1 { color: #cc0000; }
+          </style>
+        </head>
+        <body>
+          <div class="error-box">
+            <h1>OAuth Error</h1>
+            <p>Invalid or unrecognized state. Request rejected.</p>
+            <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+          </div>
+        </body>
+        </html>
+      `);
+
+      return;
+    }
+
+    // Check if state has expired
+    if (isOAuthStateExpired(sessionData)) {
+      oauthSessions.delete(returnedState);
+
+      log("OAuth callback: State expired.");
+
+      sendHTML(res, 400, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>OAuth Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+            h1 { color: #cc0000; }
+          </style>
+        </head>
+        <body>
+          <div class="error-box">
+            <h1>OAuth Error</h1>
+            <p>Authorization request expired. Please try again.</p>
+            <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+          </div>
+        </body>
+        </html>
+      `);
+
+      return;
+    }
+
+    // Delete used state from map
+    oauthSessions.delete(returnedState);
+
+    // Exchange code for token (server-side)
+    try {
+      const codeVerifier = sessionData.codeVerifier;
+
+      log(
+        `Exchanging authorization code for access token (state=${returnedState.substring(0, 8)}...)`
+      );
+
+      const tokenData = await exchangeOAuthCodeForToken(
+        code,
+        codeVerifier
+      );
+
+      // Store token in server memory
+      state.oauth.token = tokenData.access_token ||
+        tokenData.token || null;
+
+      state.oauth.tokenStored = Boolean(
+        state.oauth.token
+      );
+
+      state.oauth.connected = Boolean(
+        state.oauth.token
+      );
+
+      // Extract account ID from token response if available
+      // This assumes the OAuth token response includes account info
+      // If not, you may need to make a separate call to get account details
+      if (tokenData.account_id) {
+        state.oauth.accountId = tokenData.account_id;
+        state.oauth.accountType = "demo";
+      } else if (tokenData.loginid) {
+        state.oauth.accountId = tokenData.loginid;
+        state.oauth.accountType = "demo";
+      }
+
+      // If account ID still not set, use a default demo account ID
+      // (you may need to adjust this based on your Deriv account structure)
+      if (!state.oauth.accountId) {
+        // Try to get from Deriv API or use default
+        state.oauth.accountId = "demo";
+      }
+
+      log(
+        "Deriv OAuth 2.0 authentication completed successfully."
+      );
+
+      if (state.oauth.tokenStored && state.oauth.accountId) {
+        connectDerivWebSocket();
+      }
+
+      // Redirect to dashboard
+      res.writeHead(302, {
+        Location: "https://goldwebtrader-v2-api.onrender.com/"
+      });
+
+      res.end();
+
+    } catch (error) {
+      log(
+        "OAuth callback error: " + error.message
+      );
+
+      sendHTML(res, 500, `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>OAuth Error</title>
+          <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+            .error-box { background: #ffe6e6; border: 1px solid #cc0000; padding: 15px; border-radius: 5px; }
+            h1 { color: #cc0000; }
+          </style>
+        </head>
+        <body>
+          <div class="error-box">
+            <h1>OAuth Error</h1>
+            <p>${error.message}</p>
+            <p><a href="https://goldwebtrader-v2-api.onrender.com/">Return to GoldWebTrader</a></p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+
+    return;
+  }
+
+  // ======================================================
+  // AUTHENTICATED API ROUTES
+  // ======================================================
+  if (!authorized(req)) {
+    sendJSON(res, 401, {
+      ok: false,
+      error: "Unauthorized. Invalid API key."
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // STATUS
+  // ======================================================
+  if (
+    req.method === "GET" &&
+    (url === "/status" || url === "/api/status" || url === "/v75/status")
+  ) {
+    sendJSON(res, 200, {
+      ok: true,
+
+      server: state.server,
+
+      oauth: {
+        connected: state.oauth.connected,
+        accountType: state.oauth.accountType,
+        loginid: state.oauth.loginid,
+        tokenStored: state.oauth.tokenStored,
+        accountId: state.oauth.accountId
+      },
+
+      websocket: state.websocket,
+
+      market: state.market,
+
+      engine: { ...state.engine },
+
+      candles: state.candles.length,
+
+      positions: state.positions.length
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // V75 ENGINE STATUS
+  // ======================================================
+  if (req.method === "GET" && url === "/v75/engine/status") {
+    sendJSON(res, 200, {
+      ok: true,
+
+      engine: state.engine,
+
+      market: state.market,
+
+      indicators: getIndicatorSnapshot()
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // MARKET STATUS
+  // ======================================================
+  if (req.method === "GET" && url === "/market") {
+    sendJSON(res, 200, {
+      ok: true,
+      market: state.market,
+      candles: state.candles.length
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // LOGS
+  // ======================================================
+  if (req.method === "GET" && url === "/logs") {
+    sendJSON(res, 200, {
+      ok: true,
+      logs: state.logs
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // ENGINE SETTINGS
+  // ======================================================
+  if (req.method === "POST" && url === "/v75/engine/settings") {
+    const body = await readBody(req);
+
+    if (typeof body.enabled === "boolean") {
+      state.engine.enabled = body.enabled;
+    }
+
+    if (typeof body.executeTrades === "boolean") {
+      state.engine.executeTrades = body.executeTrades;
+    }
+
+    if (Number.isFinite(Number(body.cooldownSeconds))) {
+      state.engine.cooldownSeconds = Math.max(
+        0,
+        Number(body.cooldownSeconds)
+      );
+    }
+
+    if (Number.isFinite(Number(body.maxSignals))) {
+      state.engine.maxSignals = Math.max(
+        1,
+        Number(body.maxSignals)
+      );
+    }
+
+    if (Number.isFinite(Number(body.demoStake))) {
+      state.engine.demoStake = Math.max(
+        0.35,
+        Number(body.demoStake)
+      );
+    }
+
+    log("V75 engine settings updated.");
+
+    sendJSON(res, 200, {
+      ok: true,
+      engine: state.engine
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // ENGINE START
+  // ======================================================
+  if (req.method === "POST" && url === "/v75/engine/start") {
+    state.engine.enabled = true;
+
+    log("V75 engine STARTED.");
+
+    sendJSON(res, 200, {
+      ok: true,
+      status: state.engine.status
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // ENGINE STOP
+  // ======================================================
+  if (req.method === "POST" && url === "/v75/engine/stop") {
+    state.engine.enabled = false;
+
+    state.engine.status = "DISABLED";
+
+    log("V75 engine STOPPED.");
+
+    sendJSON(res, 200, {
+      ok: true,
+      status: state.engine.status
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // MANUAL CANDLE REFRESH
+  // ======================================================
+  if (req.method === "POST" && url === "/v75/engine/refresh") {
+    requestCandles();
+
+    sendJSON(res, 200, {
+      ok: true,
+      message: "Candle refresh requested."
+    });
+
+    return;
+  }
+
+  // ======================================================
+  // 404
+  // ======================================================
+  sendJSON(res, 404, {
+    ok: false,
+    error: "Not found",
+    path: url
+  });
+});
 
 // ============================================================
 // INDICATOR SNAPSHOT
 // ============================================================
 
 function getIndicatorSnapshot() {
-  if (
-    state.candles.length <
-    state.engine.emaSlow
-  ) {
+  if (state.candles.length < state.engine.emaSlow) {
     return {
       ready: false
     };
   }
 
-  const closes =
-    state.candles.map(
-      candle => candle.close
-    );
+  const closes = state.candles.map(
+    candle => candle.close
+  );
 
   return {
     ready: true,
 
-    price:
-      closes[closes.length - 1],
+    price: closes[closes.length - 1],
 
-    emaFast:
-      calculateEMA(
-        closes,
-        state.engine.emaFast
-      ),
+    emaFast: calculateEMA(closes, state.engine.emaFast),
 
-    emaSlow:
-      calculateEMA(
-        closes,
-        state.engine.emaSlow
-      ),
+    emaSlow: calculateEMA(closes, state.engine.emaSlow),
 
-    rsi:
-      calculateRSI(
-        closes,
-        state.engine.rsiLength
-      ),
+    rsi: calculateRSI(closes, state.engine.rsiLength),
 
-    momentum:
-      calculateMomentum(
-        closes,
-        state.engine.momentumBars
-      )
+    momentum: calculateMomentum(
+      closes,
+      state.engine.momentumBars
+    )
   };
 }
 
@@ -1963,9 +1795,7 @@ function getIndicatorSnapshot() {
 // ============================================================
 
 setInterval(() => {
-  if (
-    state.websocket.authenticated
-  ) {
+  if (state.websocket.authenticated) {
     requestCandles();
   }
 
@@ -1977,48 +1807,28 @@ setInterval(() => {
 // START SERVER
 // ============================================================
 
-server.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
-    log(
-      `GoldWebTrader V2 running on port ${PORT}`
-    );
+server.listen(PORT, "0.0.0.0", () => {
+  log(
+    `GoldWebTrader V2 running on port ${PORT}`
+  );
 
-    log(
-      "V75 (1s) server-side engine initialized."
-    );
+  log("V75 (1s) server-side engine initialized.");
 
-    log(
-      "Trade execution is DISABLED for safe demo testing."
-    );
+  log("Trade execution is DISABLED for safe demo testing.");
 
-    log(
-      "Waiting for Deriv OAuth 2.0 connection..."
-    );
-  }
-);
+  log(
+    "Waiting for Deriv OAuth 2.0 connection..."
+  );
+});
 
 // ============================================================
 // PROCESS SAFETY
 // ============================================================
 
-process.on(
-  "uncaughtException",
-  error => {
-    console.error(
-      "UNCAUGHT EXCEPTION:",
-      error
-    );
-  }
-);
+process.on("uncaughtException", error => {
+  console.error("UNCAUGHT EXCEPTION:", error);
+});
 
-process.on(
-  "unhandledRejection",
-  error => {
-    console.error(
-      "UNHANDLED REJECTION:",
-      error
-    );
-  }
-);
+process.on("unhandledRejection", error => {
+  console.error("UNHANDLED REJECTION:", error);
+});
