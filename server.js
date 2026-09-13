@@ -404,6 +404,70 @@ async function exchangeOAuthCodeForToken(code, codeVerifier) {
 }
 
 // ============================================================
+// FETCH DERIV ACCOUNTS
+// ============================================================
+
+/**
+ * Fetch all accounts for the authenticated user.
+ * Find the active DEMO account and store its real account ID.
+ */
+async function fetchAndSetDemoAccount() {
+  if (!state.oauth.token) {
+    log("Cannot fetch accounts: No OAuth token available.");
+    return false;
+  }
+
+  log("Requesting accounts from Deriv...");
+
+  try {
+    const url = `${DERIV_API}/trading/v1/options/accounts`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${state.oauth.token}`,
+        "Content-Type": "application/json"
+      }
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || data.error) {
+      const errorMsg = data.error?.message || data.error || "Account lookup failed";
+      log(`Account lookup failed: HTTP ${response.status} - ${errorMsg}`);
+      return false;
+    }
+
+    if (!data.data || !Array.isArray(data.data.accounts)) {
+      log("Account response missing accounts array.");
+      return false;
+    }
+
+    // Find the active DEMO account
+    const demoAccount = data.data.accounts.find(
+      acc => acc.account_type === "demo" && acc.is_active === true
+    );
+
+    if (!demoAccount) {
+      log("No active DEMO account found.");
+      return false;
+    }
+
+    log("Demo account found.");
+
+    // Store the real account ID, account type, and login ID
+    state.oauth.accountId = demoAccount.account_id;
+    state.oauth.accountType = "demo";
+    state.oauth.loginid = demoAccount.account_id;
+
+    return true;
+  } catch (error) {
+    log(`Account lookup error: ${error.message}`);
+    return false;
+  }
+}
+
+// ============================================================
 // DERIV OPTIONS API OTP RETRIEVAL
 // ============================================================
 
@@ -422,7 +486,7 @@ async function requestV75WebSocketOTP() {
     return null;
   }
 
-  log("Requesting V75 WebSocket OTP...");
+  log("Requesting OTP...");
 
   try {
     const accountId = state.oauth.accountId;
@@ -440,20 +504,20 @@ async function requestV75WebSocketOTP() {
 
     if (!response.ok || data.error) {
       const errorMsg = data.error?.message || data.error || "OTP request failed";
-      log(`V75 WebSocket OTP request failed: HTTP ${response.status} - ${errorMsg}`);
+      log(`OTP request failed: HTTP ${response.status} - ${errorMsg}`);
       return null;
     }
 
     if (!data.data || !data.data.url) {
-      log("V75 WebSocket OTP response missing URL.");
+      log("OTP response missing URL.");
       return null;
     }
 
-    log("V75 WebSocket OTP received.");
+    log("OTP received.");
 
     return data.data.url;
   } catch (error) {
-    log(`V75 WebSocket OTP request error: ${error.message}`);
+    log(`OTP request error: ${error.message}`);
     return null;
   }
 }
@@ -488,7 +552,7 @@ async function connectDerivWebSocket() {
 
     const WebSocket = require("ws");
 
-    log("Connecting to V75 authenticated WebSocket...");
+    log("WebSocket connected.");
 
     state.websocket.url = otpUrl;
 
@@ -1503,30 +1567,19 @@ const server = http.createServer(async (req, res) => {
         state.oauth.token
       );
 
-      // Extract account ID from token response if available
-      // This assumes the OAuth token response includes account info
-      // If not, you may need to make a separate call to get account details
-      if (tokenData.account_id) {
-        state.oauth.accountId = tokenData.account_id;
-        state.oauth.accountType = "demo";
-      } else if (tokenData.loginid) {
-        state.oauth.accountId = tokenData.loginid;
-        state.oauth.accountType = "demo";
-      }
-
-      // If account ID still not set, use a default demo account ID
-      // (you may need to adjust this based on your Deriv account structure)
-      if (!state.oauth.accountId) {
-        // Try to get from Deriv API or use default
-        state.oauth.accountId = "demo";
-      }
-
       log(
         "Deriv OAuth 2.0 authentication completed successfully."
       );
 
-      if (state.oauth.tokenStored && state.oauth.accountId) {
-        connectDerivWebSocket();
+      // Fetch active DEMO account and set the real account ID
+      if (state.oauth.tokenStored) {
+        const accountLookupSuccess = await fetchAndSetDemoAccount();
+        
+        if (accountLookupSuccess && state.oauth.accountId) {
+          connectDerivWebSocket();
+        } else {
+          log("Failed to fetch or set account ID. WebSocket not connecting.");
+        }
       }
 
       // Redirect to dashboard
