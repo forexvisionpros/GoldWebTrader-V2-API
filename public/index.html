@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GOLDWEBTRADER PRO AI | Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <style>
+    body {
+      background-color: #0b0e11;
+      color: #e0e6ed;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    .card {
+      background-color: #151a21;
+      border: 1px solid #232a34;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+    .card-header {
+      background-color: #1c232d;
+      border-bottom: 1px solid #232a34;
+      font-weight: bold;
+    }
+    .text-gold { color: #f0b90b; }
+    .badge-demo { background-color: #f0b90b; color: #000; font-weight: bold; }
+    .metric-value { font-size: 1.5rem; font-weight: bold; }
+    .status-indicator { height: 10px; width: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+    .bg-active { background-color: #0ecb81; }
+    .bg-inactive { background-color: #f6465d; }
+  </style>
+</head>
+<body class="p-3">
+  <div class="container-fluid">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+      <div>
+        <h2 class="text-gold m-0">GOLDWEBTRADER PRO AI</h2>
+        <small class="text-muted">Developer/Owner: <strong>KELVIN NGUGI</strong> | Broker: <strong>Capital.com</strong></small>
+      </div>
+      <div>
+        <span class="badge badge-demo p-2">DEMO MODE</span>
+        <span id="autoTradingBadge" class="badge bg-secondary p-2">AUTO TRADING: OFF</span>
+      </div>
+    </div>
+
+    <div class="card p-3">
+      <div class="d-flex gap-2">
+        <button onclick="controlEngine('start')" class="btn btn-success fw-bold">AUTO TRADING ON</button>
+        <button onclick="controlEngine('stop')" class="btn btn-warning fw-bold">AUTO TRADING OFF</button>
+        <button onclick="controlEngine('stop')" class="btn btn-danger fw-bold">EMERGENCY STOP</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col-md-3">
+        <div class="card p-3">
+          <span class="text-muted">Gold Price (Bid/Offer)</span>
+          <div id="goldPrice" class="metric-value text-gold">---</div>
+          <small id="goldSpread" class="text-muted">Spread: ---</small>
+        </div>
+      </div>
+
+      <div class="col-md-3">
+        <div class="card p-3">
+          <span class="text-muted">Balance / Equity</span>
+          <div id="accountBalance" class="metric-value">---</div>
+          <small id="accountPnl" class="text-muted">Today P/L: $0.00</small>
+        </div>
+      </div>
+
+      <div class="col-md-3">
+        <div class="card p-3">
+          <span class="text-muted">Sniper Signal Score</span>
+          <div id="sniperScore" class="metric-value text-info">0 / 100</div>
+          <small id="aiConfidence" class="text-muted">AI Confidence: 0%</small>
+        </div>
+      </div>
+
+      <div class="col-md-3">
+        <div class="card p-3">
+          <span class="text-muted">Engine Status</span>
+          <div id="engineSignal" class="metric-value text-warning">WAITING</div>
+          <small id="engineReason" class="text-muted">Initializing...</small>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col-md-6">
+        <div class="card">
+          <div class="card-header">Active Gold Position</div>
+          <div class="card-body" id="positionDetails">
+            <p class="text-muted">No open positions.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-6">
+        <div class="card">
+          <div class="card-header">Strategy & Confirmation Panel</div>
+          <div class="card-body">
+            <div class="row">
+              <div class="col-6"><p>EMA 9/21/50: <strong id="emaMetrics">---</strong></p></div>
+              <div class="col-6"><p>RSI (14): <strong id="rsiMetric">---</strong></p></div>
+              <div class="col-6"><p>ADX (14): <strong id="adxMetric">---</strong></p></div>
+              <div class="col-6"><p>ATR (14): <strong id="atrMetric">---</strong></p></div>
+              <div class="col-12"><p>Market Structure: <strong id="structureMetric">NEUTRAL</strong></p></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Trade History</div>
+      <div class="card-body p-0">
+        <table class="table table-dark table-striped m-0">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Symbol</th>
+              <th>Direction</th>
+              <th>Size</th>
+              <th>Entry</th>
+              <th>Score</th>
+              <th>AI Conf</th>
+              <th>Reason</th>
+            </tr>
+          </thead>
+          <tbody id="historyTable">
+            <tr><td colspan="8" class="text-center text-muted">No trades executed yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_KEY = "6e0bcb8010ca8e0775f30c1d9241c48f";
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/engine/status');
+        const data = await res.json();
+        if (!data.ok) return;
+
+        document.getElementById('goldPrice').innerText = `$${data.ticker.price.toFixed(2)}`;
+        document.getElementById('goldSpread').innerText = `Bid: ${data.ticker.bid} | Offer: ${data.ticker.offer} | Spread: ${data.ticker.spread}`;
+
+        if (data.account && data.account.balance) {
+          document.getElementById('accountBalance').innerText = `$${data.account.balance.balance.toFixed(2)}`;
+        }
+
+        document.getElementById('engineSignal').innerText = data.signal.signal;
+        document.getElementById('engineReason').innerText = data.signal.reason;
+        document.getElementById('sniperScore').innerText = `${data.signal.score || 0} / 100`;
+        document.getElementById('aiConfidence').innerText = `AI Confidence: ${data.signal.aiConfidence || 0}%`;
+
+        const autoBadge = document.getElementById('autoTradingBadge');
+        autoBadge.innerText = `AUTO TRADING: ${data.system.autoTrading ? 'ON' : 'OFF'}`;
+        autoBadge.className = data.system.autoTrading ? 'badge bg-success p-2' : 'badge bg-secondary p-2';
+
+        const posContainer = document.getElementById('positionDetails');
+        if (data.openPositions && data.openPositions.length > 0) {
+          const pos = data.openPositions[0].position;
+          posContainer.innerHTML = `
+            <p><strong>Direction:</strong> ${pos.direction} (${pos.size} Lot)</p>
+            <p><strong>Entry Price:</strong> ${pos.level}</p>
+            <p><strong>Unrealized PnL:</strong> <span class="${pos.upl >= 0 ? 'text-success' : 'text-danger'}">$${pos.upl}</span></p>
+            <button onclick="closePosition('${pos.dealId}')" class="btn btn-sm btn-danger">Close Position</button>
+          `;
+        } else {
+          posContainer.innerHTML = '<p class="text-muted">No open positions.</p>';
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    async function controlEngine(action) {
+      await fetch(`/engine/${action}`, {
+        method: 'POST',
+        headers: { 'X-API-KEY': API_KEY }
+      });
+      fetchStatus();
+    }
+
+    async function closePosition(dealId) {
+      await fetch(`/capital/positions/${dealId}`, {
+        method: 'DELETE',
+        headers: { 'X-API-KEY': API_KEY }
+      });
+      fetchStatus();
+    }
+
+    setInterval(fetchStatus, 3000);
+    fetchStatus();
+  </script>
+</body>
+</html>
