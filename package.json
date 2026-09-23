@@ -1,17 +1,29 @@
 {
-  "name": "goldwebtrader-v2-api",
-  "version": "1.0.0",
-  "description": "GoldWebTrader V2 API",
+  "name": "goldwebtrader-pro-ai",
+  "version": "3.0.0",
+  "description": "GoldWebTrader Pro AI trading dashboard and broker integration server",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
+  "keywords": [
+    "gold",
+    "trading",
+    "capital-com",
+    "fx",
+    "broker",
+    "dashboard"
+  ],
+  "author": "KELVIN NGUGI",
+  "license": "MIT",
+  "private": true,
   "engines": {
-    "node": "22.x"
+    "node": ">=18"
   },
   "dependencies": {
-    "cors": "^2.8.5",
-    "express": "^5.1.0",
-    "ws": "^8.18.3"
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2"
   }
 }
