@@ -212,11 +212,26 @@ async function engineCycle() {
 
 app.get("/", (req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 app.get("/health", (req, res) => res.json({ ok: true, mode: DEMO ? "DEMO" : "LIVE", autoTrading: config.autoTrading, resolution: RESOLUTION }));
-app.get("/engine/status", async (req, res) => { try { res.json({ ok: true, system: { mode: DEMO ? "DEMO" : "LIVE", autoTrading: config.autoTrading, emergencyStop: config.emergencyStop, resolution: RESOLUTION }, signal: lastSignal, daily, positions: await positions() }); } catch (e) { res.status(500).json({ ok: false, error: String(brokerError(e)) }); } });
+app.get("/engine/status", async (req, res) => {
+  try {
+    const [gold, currentPositions, accountInfo] = await Promise.all([price(), positions(), account()]);
+    res.json({
+      ok: true,
+      system: { mode: DEMO ? "DEMO" : "LIVE", autoTrading: config.autoTrading, emergencyStop: config.emergencyStop, resolution: RESOLUTION },
+      ticker: gold,
+      account: accountInfo.accounts?.[0] || accountInfo[0] || accountInfo,
+      openPositions: currentPositions.filter(p => p.market?.epic === EPIC),
+      signal: lastSignal,
+      daily
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String(brokerError(e)), system: { mode: DEMO ? "DEMO" : "LIVE", autoTrading: config.autoTrading, emergencyStop: config.emergencyStop, resolution: RESOLUTION }, signal: lastSignal, daily });
+  }
+});
 app.get("/engine/signal", (req, res) => res.json({ ok: true, signal: lastSignal }));
 app.get("/engine/history", auth, (req, res) => res.json({ ok: true, history: trades }));
-app.post("/engine/start", auth, (req, res) => { config.autoTrading = true; config.emergencyStop = false; res.json({ ok: true, config }); });
-app.post("/engine/stop", auth, (req, res) => { config.autoTrading = false; config.emergencyStop = true; res.json({ ok: true, config }); });
+app.post("/engine/start", auth, (req, res) => { config.autoTrading = true; config.emergencyStop = false; res.json({ ok: true, message: "Automated trading enabled", config }); });
+app.post("/engine/stop", auth, (req, res) => { config.autoTrading = false; config.emergencyStop = true; res.json({ ok: true, message: "Emergency stop activated", config }); });
 app.post("/engine/config", auth, (req, res) => { const allowed = ["maxOpenTrades", "maxTradesPerDay", "maxDailyLoss", "riskPercent", "maxSpread", "minScore", "cooldownSeconds", "slAtr", "tpAtr"]; for (const key of allowed) if (req.body[key] !== undefined) config[key] = Number(req.body[key]); res.json({ ok: true, config }); });
 app.get("/capital/price", auth, async (req, res) => { try { res.json({ ok: true, gold: await price() }); } catch (e) { res.status(502).json({ ok: false, error: String(brokerError(e)) }); } });
 app.get("/capital/account", auth, async (req, res) => { try { res.json({ ok: true, account: await account() }); } catch (e) { res.status(502).json({ ok: false, error: String(brokerError(e)) }); } });
