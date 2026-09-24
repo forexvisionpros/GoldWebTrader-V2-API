@@ -6,10 +6,24 @@
   <title>GOLDWEBTRADER PRO AI | Dashboard</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
   <style>
-    body { background:#0b0e11; color:#e0e6ed; font-family:Segoe UI,Tahoma,sans-serif; }
-    .card { background:#151a21; border:1px solid #232a34; border-radius:8px; margin-bottom:20px; }
-    .card-header { background:#1c232d; border-bottom:1px solid #232a34; font-weight:bold; }
-    .text-gold { color:#f0b90b; } .metric-value { font-size:1.5rem; font-weight:bold; }
+    body { background:#0b0e11; color:#ffffff; font-family:Segoe UI,Tahoma,sans-serif; }
+    .card { background:#151a21; border:1px solid #2d3748; border-radius:8px; margin-bottom:20px; color:#ffffff; }
+    .card-header { background:#1c232d; border-bottom:1px solid #2d3748; font-weight:bold; color:#f0b90b; }
+    
+    /* High-contrast text overrides */
+    .text-gold { color:#f0b90b !important; } 
+    .metric-value { font-size:1.5rem; font-weight:bold; color:#ffffff; }
+    .card label, .card span, p { color:#e0e6ed !important; }
+    small, .text-muted { color:#a0aec0 !important; font-weight: 500; }
+    
+    /* Table styling */
+    table, th, td { color:#ffffff !important; border-color:#2d3748 !important; }
+    th { color:#f0b90b !important; text-transform: uppercase; font-size: 0.85rem; }
+    
+    /* Input field contrast */
+    input.form-control { background-color:#1e2329 !important; color:#ffffff !important; border:1px solid #474d57 !important; }
+    input.form-control::placeholder { color:#848e9c !important; }
+    
     button:disabled { opacity:.65; cursor:wait; }
   </style>
 </head>
@@ -31,11 +45,11 @@
     <div class="row">
       <div class="col-md-3"><div class="card p-3"><span class="text-muted">Gold Price</span><div id="goldPrice" class="metric-value text-gold">---</div><small id="goldSpread" class="text-muted">Bid: --- | Offer: --- | Spread: ---</small></div></div>
       <div class="col-md-3"><div class="card p-3"><span class="text-muted">Balance</span><div id="accountBalance" class="metric-value">---</div><small id="accountPnl" class="text-muted">Today P/L: $0.00</small></div></div>
-      <div class="col-md-3"><div class="card p-3"><span class="text-muted">Sniper Score</span><div id="sniperScore" class="metric-value text-info">0 / 75</div><small id="signalCandle" class="text-muted">No signal yet</small></div></div>
+      <div class="col-md-3"><div class="card p-3"><span class="text-muted">Sniper Score</span><div id="sniperScore" class="metric-value text-info">0 / 85</div><small id="signalCandle" class="text-muted">No signal yet</small></div></div>
       <div class="col-md-3"><div class="card p-3"><span class="text-muted">Engine Status</span><div id="engineSignal" class="metric-value text-warning">WAITING</div><small id="engineReason" class="text-muted">Initializing...</small></div></div>
     </div>
 
-    <div class="row"><div class="col-md-6"><div class="card"><div class="card-header">Active Gold Positions</div><div class="card-body" id="positionDetails"><p class="text-muted">No open positions.</p></div></div></div><div class="col-md-6"><div class="card"><div class="card-header">Strategy Metrics</div><div class="card-body"><p>EMA 9/21/50: <strong id="emaMetrics">---</strong></p><p>RSI: <strong id="rsiMetric">---</strong> | ADX: <strong id="adxMetric">---</strong> | ATR: <strong id="atrMetric">---</strong></p><p>Daily trades: <strong id="dailyTrades">0</strong></p></div></div></div></div>
+    <div class="row"><div class="col-md-6"><div class="card"><div class="card-header">Active Gold Positions</div><div class="card-body" id="positionDetails"><p class="text-muted">No open positions.</p></div></div></div><div class="col-md-6"><div class="card"><div class="card-header">Strategy Metrics</div><div class="card-body"><p>EMA 9/21/50: <strong id="emaMetrics" class="text-gold">---</strong></p><p>RSI: <strong id="rsiMetric" class="text-gold">---</strong> | ADX: <strong id="adxMetric" class="text-gold">---</strong> | ATR: <strong id="atrMetric" class="text-gold">---</strong></p><p>Daily trades: <strong id="dailyTrades" class="text-gold">0</strong></p></div></div></div></div>
     <div class="card"><div class="card-header">Trade History</div><div class="card-body p-0"><div class="table-responsive"><table class="table table-dark table-striped m-0"><thead><tr><th>Time</th><th>Direction</th><th>Size</th><th>Entry</th><th>SL</th><th>TP</th><th>Score</th></tr></thead><tbody id="historyTable"><tr><td colspan="7" class="text-center text-muted">No trades executed yet.</td></tr></tbody></table></div></div></div>
   </div>
 
@@ -62,7 +76,7 @@ async function fetchStatus() {
     document.getElementById('accountBalance').textContent = money(balance);
     document.getElementById('engineSignal').textContent = data.signal?.signal || 'WAITING';
     document.getElementById('engineReason').textContent = data.signal?.reason || 'No signal';
-    document.getElementById('sniperScore').textContent = `${data.signal?.score || 0} / 75`;
+    document.getElementById('sniperScore').textContent = `${data.signal?.score || 0} / 85`;
     document.getElementById('signalCandle').textContent = data.signal?.candle ? `Candle: ${data.signal.candle}` : 'No signal candle';
     const m = data.signal?.details || {};
     document.getElementById('emaMetrics').textContent = [m.e9,m.e21,m.e50].map(v => Number.isFinite(Number(v)) ? Number(v).toFixed(2) : '---').join(' / ');
@@ -71,6 +85,7 @@ async function fetchStatus() {
     document.getElementById('atrMetric').textContent = Number.isFinite(Number(m.atr)) ? Number(m.atr).toFixed(2) : '---';
     document.getElementById('dailyTrades').textContent = data.daily?.count ?? 0;
     renderPositions(data.openPositions || []);
+    renderHistory(data.tradeHistory || []);
     showMessage(`Connected. Strategy timeframe: ${data.system.resolution}.`);
   } catch (error) { showMessage(error.message, true); }
 }
@@ -78,7 +93,23 @@ async function fetchStatus() {
 function renderPositions(list) {
   const el = document.getElementById('positionDetails');
   if (!list.length) { el.innerHTML = '<p class="text-muted">No open Gold positions.</p>'; return; }
-  el.innerHTML = list.map(item => { const p = item.position || {}; return `<div class="border-bottom border-secondary pb-2 mb-2"><p><strong>${p.direction || '---'}</strong> | Size: ${p.size ?? '---'} | Entry: ${p.level ?? '---'}</p><p>Unrealized P/L: ${money(p.upl)}</p><button onclick="closePosition('${p.dealId || ''}')" class="btn btn-sm btn-danger">Close Position</button></div>`; }).join('');
+  el.innerHTML = list.map(item => { const p = item.position || {}; return `<div class="border-bottom border-secondary pb-2 mb-2"><p><strong class="text-gold">${p.direction || '---'}</strong> | Size: ${p.size ?? '---'} | Entry: ${p.level ?? '---'}</p><p>Unrealized P/L: ${money(p.upl)}</p><button onclick="closePosition('${p.dealId || ''}')" class="btn btn-sm btn-danger">Close Position</button></div>`; }).join('');
+}
+
+function renderHistory(list) {
+  const tbody = document.getElementById('historyTable');
+  if (!list.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted">No trades executed yet.</td></tr>'; return; }
+  tbody.innerHTML = list.map(t => `
+    <tr>
+      <td>${t.time || t.date || '---'}</td>
+      <td><span class="badge ${t.direction === 'BUY' ? 'bg-success' : 'bg-danger'}">${t.direction || '---'}</span></td>
+      <td>${t.size ?? '---'}</td>
+      <td>${t.entry ?? '---'}</td>
+      <td>${t.sl ?? '---'}</td>
+      <td>${t.tp ?? '---'}</td>
+      <td>${t.score ?? '---'}</td>
+    </tr>
+  `).join('');
 }
 
 async function controlEngine(action) {
@@ -88,10 +119,11 @@ async function controlEngine(action) {
   document.querySelectorAll('button').forEach(button => button.disabled = true);
   try { const res = await fetch(`/engine/${action}`, { method: 'POST', headers: headers() }); const data = await res.json(); if (!res.ok || !data.ok) throw new Error(data.error || 'Engine command failed'); showMessage(data.message || `Engine ${action} completed.`); await fetchStatus(); } catch (error) { showMessage(error.message, true); } finally { document.querySelectorAll('button').forEach(button => button.disabled = false); }
 }
+
 async function closePosition(dealId) { if (!dealId) return; try { const res = await fetch(`/capital/positions/${encodeURIComponent(dealId)}`, { method: 'DELETE', headers: headers() }); const data = await res.json(); if (!res.ok || !data.ok) throw new Error(data.error || 'Close request failed'); await fetchStatus(); } catch (error) { showMessage(error.message, true); } }
+
 setInterval(fetchStatus, 5000);
 fetchStatus();
 </script>
 </body>
 </html>
-
