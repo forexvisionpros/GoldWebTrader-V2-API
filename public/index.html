@@ -131,18 +131,21 @@
         const res = await fetch('/engine/status', { headers: headers() });
         const data = await res.json();
         if (!res.ok || !data.ok) throw new Error(data.error || `Status request failed (${res.status})`);
-        const ticker = data.ticker || {};
         const system = data.system || {};
+        // Older responses expose the quote as `ticker`; newer responses put it on `system`.
+        const quote = data.ticker || system.quote || {};
+        // The account endpoint returns an accounts array. Keep the old object shape as a fallback.
+        const account = data.account?.accounts?.[0] || data.account || {};
         const signal = data.signal || {};
         document.getElementById('modeBadge').textContent = `${system.mode || 'UNKNOWN'} MODE`;
         document.getElementById('modeBadge').className = `badge ${system.mode === 'LIVE' ? 'bg-danger' : 'bg-warning text-dark'} p-2`;
         document.getElementById('autoTradingBadge').textContent = `AUTO TRADING: ${system.autoTrading ? 'ON' : 'OFF'}`;
         document.getElementById('autoTradingBadge').className = `badge ${system.autoTrading ? 'bg-success' : 'bg-secondary'} p-2`;
-        document.getElementById('goldPrice').textContent = money(ticker.price);
-        document.getElementById('goldSpread').textContent = `Bid: ${ticker.bid ?? '---'} | Offer: ${ticker.offer ?? '---'} | Spread: ${ticker.spread ?? '---'}`;
-        const balance = data.account?.balance?.balance ?? data.account?.balance;
+        document.getElementById('goldPrice').textContent = money(quote.price);
+        document.getElementById('goldSpread').textContent = `Bid: ${quote.bid ?? '---'} | Offer: ${quote.offer ?? '---'} | Spread: ${quote.spread ?? '---'}`;
+        const balance = account.balance?.balance ?? account.balance;
         document.getElementById('accountBalance').textContent = money(balance);
-        document.getElementById('accountPnl').textContent = `Today P/L: ${money(data.daily?.pnl ?? data.account?.pnl)}`;
+        document.getElementById('accountPnl').textContent = `Today P/L: ${money(data.daily?.pnl ?? account.pnl)}`;
         document.getElementById('engineSignal').textContent = signal.signal || 'WAITING';
         document.getElementById('engineReason').textContent = signal.reason || 'No signal';
         document.getElementById('sniperScore').textContent = `${signal.score || 0} / 85`;
@@ -165,7 +168,7 @@
       el.innerHTML = list.map(item => {
         const p = item.position || item;
         const dealId = p.dealId || p.dealReference || p.id;
-        return `<div class="border-bottom border-secondary pb-2 mb-2"><p><strong class="text-gold">${escapeHtml(p.direction || '---')}</strong> | Size: ${escapeHtml(p.size)} | Entry: ${escapeHtml(p.openPrice ?? p.entryPrice)} | P/L: ${escapeHtml(p.profit ?? p.pnl)}</p><button class="btn btn-sm btn-outline-danger" onclick="closePosition('${escapeHtml(dealId)}')">Close position</button></div>`;
+        return `<div class="border-bottom border-secondary pb-2 mb-2"><p><strong class="text-gold">${escapeHtml(p.direction || '---')}</strong> | Size: ${escapeHtml(p.size)} | Entry: ${escapeHtml(p.entryPrice)} | P/L: ${escapeHtml(p.profit)}</p><button class="btn btn-sm btn-outline-danger" onclick="closePosition('${escapeHtml(dealId)}')">Close</button></div>`;
       }).join('');
     }
 
@@ -173,7 +176,7 @@
     function renderHistory(list) {
       const tbody = document.getElementById('historyTable');
       if (!list.length) { tbody.innerHTML = '<tr><td colspan="7" class="text-center">No trades executed yet.</td></tr>'; return; }
-      tbody.innerHTML = list.map(t => `<tr><td>${escapeHtml(t.time || t.date)}</td><td><span class="badge ${t.direction === 'BUY' ? 'bg-success' : 'bg-danger'}">${escapeHtml(t.direction)}</span></td><td>${escapeHtml(t.size)}</td><td>${escapeHtml(t.entry)}</td><td>${escapeHtml(t.sl)}</td><td>${escapeHtml(t.tp)}</td><td>${escapeHtml(t.score)}</td></tr>`).join('');
+      tbody.innerHTML = list.map(t => `<tr><td>${escapeHtml(t.time || t.date)}</td><td><span class="badge ${t.direction === 'BUY' ? 'bg-success' : 'bg-danger'}">${escapeHtml(t.direction)}</span></td><td>${escapeHtml(t.size)}</td><td>${escapeHtml(t.entry)}</td><td>${escapeHtml(t.stopLoss)}</td><td>${escapeHtml(t.takeProfit)}</td><td>${escapeHtml(t.score)}</td></tr>`).join('');
     }
 
     async function controlEngine(action) {
